@@ -1,4 +1,4 @@
-// utils/openai.js (Implementing Function Calling - CORRECTED axios call)
+// utils/openai.js (Implementing Function Calling - CORRECTED Tool Description)
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
@@ -10,7 +10,8 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_API_URL = process.env.OPENAI_API_URL || 'https://api.openai.com/v1/chat/completions';
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4-turbo';
 const TIME_ZONE = process.env.TIME_ZONE || 'Africa/Cairo';
-const HISTORY_LIMIT = parseInt(process.env.HISTORY_LIMIT || '4', 10); // Using 4 based on last successful test
+// Let's keep history limit at 4 as it seemed to work for context recall
+const HISTORY_LIMIT = parseInt(process.env.HISTORY_LIMIT || '4', 10);
 
 // --- Function to read prompt files safely ---
 function readPromptFromFile(fileName) {
@@ -32,7 +33,7 @@ const generalSystemPrompt = readPromptFromFile('generalPrompt.txt');
 const reminderParserSystemPromptTemplate = readPromptFromFile('reminderParserPrompt.txt');
 
 
-// --- Tool Definition for findReminders ---
+// --- Tool Definition for findReminders (Corrected Subject Description) ---
 const findRemindersTool = {
   type: "function",
   function: {
@@ -41,8 +42,15 @@ const findRemindersTool = {
     parameters: {
       type: "object",
       properties: {
-        date_phrase: { type: "string", description: "Date phrase mentioned by user (e.g., 'tomorrow', 'June 18th', 'that travel day')" },
-        subject: { type: "string", description: "Keyword/subject to search in reminder text (e.g., 'flight', 'Ehab', 'meeting')" }
+        date_phrase: {
+          type: "string",
+          description: "The date phrase mentioned by the user, e.g., 'tomorrow', 'today', 'June 18th', 'next monday', 'that travel day', 'the day we discussed'"
+        },
+        subject: {
+          type: "string",
+          // <<<--- تم تعديل الوصف هنا ---<<<
+          description: "A keyword or phrase *in Egyptian Arabic* extracted from the user's query representing the reminder subject, e.g., 'طيارة', 'ايهاب', 'اجتماع', 'خدمة العملاء', 'المكوة'. Use the exact Arabic phrase if possible."
+        }
       },
       required: []
     }
@@ -70,7 +78,9 @@ async function getOpenAIResponseAndTools(userMessage, conversationId) {
     if (!OPENAI_API_KEY) { /* ... key check ... */ return { type: 'error', content: 'AI service unavailable' }; }
     if (!conversationId) { /* ... id check ... */ return { type: 'error', content: 'Internal error (no conv ID)' }; }
 
-    const systemPrompt = generalSystemPrompt + "\n\nIf the user asks about their schedule or reminders, use the 'findReminders' tool to get the information before answering.";
+    // Using general prompt + tool usage hint
+    const systemPrompt = generalSystemPrompt + "\n\nWhen asked about schedules or specific reminders, use the 'findReminders' tool.";
+
     const history = await getRecentHistory(conversationId);
     const messages = [ { role: "system", content: systemPrompt }, ...history, { role: "user", content: userMessage } ];
 
@@ -79,16 +89,10 @@ async function getOpenAIResponseAndTools(userMessage, conversationId) {
         const response = await axios.post(OPENAI_API_URL, {
             model: OPENAI_MODEL,
             messages: messages,
-            tools: [findRemindersTool],
+            tools: [findRemindersTool], // Pass the corrected tool definition
             tool_choice: "auto",
             max_tokens: 250
-        // --- <<< الجزء ده تم تصحيحه ---<<<
-        }, {
-            headers: {
-                'Authorization': `Bearer ${OPENAI_API_KEY}`,
-                'Content-Type': 'application/json' // Added Content-Type header
-            }
-        }); // <<< الأقواس الناقصة تم إضافتها >>>
+        }, { headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'application/json' } });
 
         const responseMessage = response.data.choices?.[0]?.message;
         if (!responseMessage) { /* ... handle no response ... */ return { type: 'error', content: 'No response from AI' }; }
@@ -100,6 +104,7 @@ async function getOpenAIResponseAndTools(userMessage, conversationId) {
             if (toolCall.function.name === "findReminders") {
                 try {
                     const args = JSON.parse(toolCall.function.arguments);
+                    console.log("🛠️ Tool arguments received from AI:", args); // Log received arguments
                     return { type: 'tool_call', call_id: toolCall.id, name: 'findReminders', arguments: { date_phrase: args.date_phrase, subject: args.subject }, original_messages: messages, original_tool_call_response: responseMessage };
                 } catch (parseError) { console.error("❌ Error parsing tool arguments:", parseError); return { type: 'error', content: 'Error processing AI tool request' }; }
             } else { console.warn("⚠️ Unknown tool requested:", toolCall.function.name); return { type: 'error', content: 'Unsupported tool request' }; }
@@ -116,25 +121,25 @@ async function getOpenAIResponseAndTools(userMessage, conversationId) {
 }
 
 // --- Reminder Parsing Function (Separate, uses JSON mode) ---
+// Kept as is, uses HISTORY_LIMIT (currently 4 by default)
 async function parseReminderWithOpenAI(userMessage, conversationId) {
     if (!OPENAI_API_KEY) { /* ... key check ... */ return null; }
     if (!conversationId) { /* ... id check ... */ return null; }
-    // Using HISTORY_LIMIT for this parser as well now, set default lower if needed via Env Var
-    const history = await getRecentHistory(conversationId, parseInt(process.env.REMINDER_HISTORY_LIMIT || `${HISTORY_LIMIT}`, 10));
+    const history = await getRecentHistory(conversationId); // Use HISTORY_LIMIT (4)
     const nowInCairo = DateTime.now().setZone(TIME_ZONE);
     const currentTimeString = nowInCairo.toFormat("yyyy-MM-dd HH:mm ZZZZ");
     const systemPrompt = reminderParserSystemPromptTemplate.replace('{currentTime}', currentTimeString);
     const messages = [ { role: "system", content: systemPrompt }, ...history, { role: "user", content: userMessage } ];
     try {
         console.log(`🤖 Sending reminder parse query (JSON Mode) with ${history.length} history messages.`);
-        const response = await axios.post(OPENAI_API_URL, { model: OPENAI_MODEL, messages: messages, temperature: 0.1, max_tokens: 150, response_format: { type: "json_object" } }, { headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'application/json' } }); // Added headers here too
+        const response = await axios.post(OPENAI_API_URL, { model: OPENAI_MODEL, messages: messages, temperature: 0.1, max_tokens: 150, response_format: { type: "json_object" } }, { headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'application/json' } });
         // --- Rest of JSON parsing logic --- (Same as before)
         let responseData = response.data.choices?.[0]?.message?.content; console.log(`🤖 OpenAI raw parsing response: "${responseData}"`); if (!responseData) { console.warn("⚠️ OpenAI parsing response empty."); return null; } let parsedJson; try { if (typeof responseData === 'string') { if (responseData.trim().toLowerCase() === 'null') { console.log("⚠️ OpenAI returned null string."); return null; } responseData = responseData.replace(/^```json\s*/, '').replace(/\s*```$/, ''); parsedJson = JSON.parse(responseData); } else if (typeof responseData === 'object' && responseData !== null) { parsedJson = responseData; } else { console.warn("⚠️ Unexpected OpenAI response type."); return null; } if (parsedJson && typeof parsedJson.reminder_text === 'string' && typeof parsedJson.local_datetime_iso === 'string') { if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(parsedJson.local_datetime_iso)) { console.log("✅ Successfully parsed JSON from OpenAI:", parsedJson); return parsedJson; } else { console.warn("⚠️ OpenAI JSON date format incorrect:", parsedJson.local_datetime_iso); return null; } } else { console.warn("⚠️ OpenAI JSON missing fields/wrong types:", parsedJson); return null; } } catch (jsonError) { console.error("❌ Error parsing JSON response:", jsonError.message); return null; }
     } catch (error) { /* ... API call error handling ... */ return null; }
 }
 
-// Export the main interaction function and the specialized parser
+// Export the functions needed by webhook.js
 module.exports = {
-    getOpenAIResponseAndTools,
-    parseReminderWithOpenAI
+    getOpenAIResponseAndTools, // Main function using tools
+    parseReminderWithOpenAI    // Specialized function for direct reminder parsing
 };
