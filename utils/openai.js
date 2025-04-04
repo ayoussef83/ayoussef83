@@ -1,16 +1,18 @@
-// utils/openai.js (TEST VERSION - History DISABLED for Reminder Parsing)
+// utils/openai.js (Reads prompts from files & USES LIMITED HISTORY)
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const { DateTime } = require('luxon');
-const { getDb } = require('./database.js'); // Assuming database.js is in the same utils folder
+// --- <<< استدعاء دالة getDb عشان نوصل للداتا بيز >>> ---
+const { getDb } = require('./database.js'); // تأكد إن المسار ده صح
 
 // --- Load configuration ---
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_API_URL = process.env.OPENAI_API_URL || 'https://api.openai.com/v1/chat/completions';
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4-turbo';
 const TIME_ZONE = process.env.TIME_ZONE || 'Africa/Cairo';
-const HISTORY_LIMIT = parseInt(process.env.HISTORY_LIMIT || '6', 10); // Still defined, but not used by parser in this test version
+// --- <<< تم تغيير القيمة الافتراضية هنا إلى 2 >>> ---
+const HISTORY_LIMIT = parseInt(process.env.HISTORY_LIMIT || '2', 10); // الافتراضي آخر رسالتين فقط
 
 // --- Function to read prompt files safely ---
 function readPromptFromFile(fileName) {
@@ -29,6 +31,7 @@ function readPromptFromFile(fileName) {
 
 // --- Read prompts from files ONCE at startup ---
 const generalSystemPrompt = readPromptFromFile('generalPrompt.txt');
+// استخدمنا الـ prompt المعدل اللي فيه توضيح عن استخدام الهيستوري للسياق فقط
 const reminderParserSystemPromptTemplate = readPromptFromFile('reminderParserPrompt.txt');
 
 
@@ -47,12 +50,12 @@ async function getRecentHistory(conversationId, limit = HISTORY_LIMIT) {
 }
 
 
-// --- Function for general replies (STILL USES HISTORY) ---
+// --- Function for general replies (Uses History) ---
 async function getReplyFromOpenAI(userMessage, conversationId) {
     if (!OPENAI_API_KEY) { console.error("❌ OpenAI API key missing!"); return "آسف..."; }
     if (!conversationId) { console.error("❌ conversationId missing (general reply)"); return "آسف..."; }
     const systemPrompt = generalSystemPrompt;
-    const history = await getRecentHistory(conversationId); // Fetch history
+    const history = await getRecentHistory(conversationId); // Fetch history (limit=2 by default now)
     const messages = [ { role: "system", content: systemPrompt }, ...history, { role: "user", content: userMessage } ]; // Include history
 
     try {
@@ -64,31 +67,32 @@ async function getReplyFromOpenAI(userMessage, conversationId) {
     } catch (error) { /* ... error handling ... */ return `حصل خطأ...`; }
 }
 
-// --- Function for parsing reminders (MODIFIED **NOT** TO SEND HISTORY for TESTING) ---
+// --- Function for parsing reminders (Uses History - Limit=2) ---
 async function parseReminderWithOpenAI(userMessage, conversationId) {
     if (!OPENAI_API_KEY) { console.error("❌ OpenAI API key missing!"); return null; }
     if (!conversationId) { console.error("❌ conversationId missing (parse reminder)"); return null; }
 
     const nowInCairo = DateTime.now().setZone(TIME_ZONE);
     const currentTimeString = nowInCairo.toFormat("yyyy-MM-dd HH:mm ZZZZ");
+    // Use the template that includes instructions on using history for context
     const systemPrompt = reminderParserSystemPromptTemplate.replace('{currentTime}', currentTimeString);
 
-    // --- We fetch history BUT DO NOT SEND IT for this test ---
-    const history = await getRecentHistory(conversationId); // Fetched but not used below
+    // --- <<< Get recent history (Limit is 2 by default now) >>> ---
+    const history = await getRecentHistory(conversationId);
 
-    // --- Construct messages array WITHOUT history for this specific function ---
+    // --- <<< Construct messages array WITH history (last 2 messages) >>> ---
     const messages = [
         { role: "system", content: systemPrompt },
-        // ...history, // <--- السطر ده متعطل في نسخة الاختبار دي
-        { role: "user", content: userMessage } // User message only
+        ...history, // <--- رجعنا الهيستوري هنا تاني (بس هيكون قليل المرة دي)
+        { role: "user", content: userMessage }
     ];
 
     try {
-        // Modified log message for clarity during testing
-        console.log(`🤖 Sending reminder parse query to OpenAI **WITHOUT HISTORY (TEST)**. Current message: "${userMessage}"`);
+        // Log reflects that history is being sent again
+        console.log(`🤖 Sending reminder parse query to OpenAI with ${history.length} history messages. Current message: "${userMessage}"`);
         const response = await axios.post(OPENAI_API_URL, {
             model: OPENAI_MODEL,
-            messages: messages, // Sending array without history
+            messages: messages, // Send array including limited history
             temperature: 0.1,
             max_tokens: 150,
             response_format: { type: "json_object" }
