@@ -33,7 +33,7 @@ const generalSystemPrompt = readPromptFromFile('generalPrompt.txt');
 const reminderParserSystemPromptTemplate = readPromptFromFile('reminderParserPrompt.txt');
 
 
-// --- <<< Tool Definition for findReminders >>> ---
+// --- Tool Definition for findReminders ---
 // Describes the function to OpenAI so it knows when and how to call it
 const findRemindersTool = {
   type: "function",
@@ -46,10 +46,11 @@ const findRemindersTool = {
         // OpenAI will attempt to extract these parameters from the user's query and conversation history
         date_phrase: {
           type: "string",
-          description: "The date or time phrase mentioned by the user relevant to the query, e.g., 'tomorrow', 'today', 'June 18th', 'next monday', 'that travel day', 'this morning'. The bot backend will parse this phrase."
+          description: "The date or time phrase mentioned by the user relevant to the query, e.g., 'tomorrow', 'today', 'June 18th', 'next monday', 'that travel day', 'the day we discussed'"
         },
         subject: {
           type: "string",
+          // <<<--- تم تعديل الوصف هنا ---<<<
           description: "A keyword or phrase *in Egyptian Arabic* extracted from the user's query representing the reminder subject, e.g., 'طيارة', 'ايهاب', 'اجتماع', 'خدمة العملاء', 'المكوة'. Use the exact Arabic phrase if possible."
         }
       },
@@ -85,15 +86,17 @@ async function getRecentHistory(conversationId, limit = HISTORY_LIMIT) {
  * Gets a response from OpenAI, potentially deciding to call a tool or reply directly.
  * @param {string} userMessage - The current message from the user.
  * @param {string} conversationId - The user's WhatsApp ID.
- * @returns {Promise<object>} - An object indicating the response type.
+ * @returns {Promise<object>} - An object indicating the response type:
+ * { type: 'content', content: string } for direct reply
+ * { type: 'tool_call', call_id: string, name: string, arguments: object, original_messages: Array, original_tool_call_response: object } for function call
+ * { type: 'error', content: string } for errors
  */
 async function getOpenAIResponseAndTools(userMessage, conversationId) {
-    if (!OPENAI_API_KEY) { /* ... key check ... */ return { type: 'error', content: 'AI service unavailable' }; }
-    if (!conversationId) { /* ... id check ... */ return { type: 'error', content: 'Internal error (no conv ID)' }; }
+    if (!OPENAI_API_KEY) { console.error("❌ OpenAI API key missing!"); return { type: 'error', content: 'AI service unavailable' }; }
+    if (!conversationId) { console.error("❌ Internal error (no conv ID)"); return { type: 'error', content: 'Internal error (no conv ID)' }; }
 
     // Add instruction about tool usage to the general prompt
-    // We might refine this prompt later based on testing
-    const systemPrompt = generalSystemPrompt + "\n\nWhen the user asks about their schedule, appointments, or specific reminders (like 'what do I have tomorrow?' or 'when is the flight reminder?'), you MUST use the 'findReminders' tool to search the database before answering. Do not invent schedule details.";
+    const systemPrompt = generalSystemPrompt + "\n\nWhen asked about schedules or specific reminders, use the 'findReminders' tool to search the database before answering. Do not invent schedule details.";
 
     const history = await getRecentHistory(conversationId); // Fetch recent history (limit=4 by default now)
     const messages = [
@@ -127,7 +130,7 @@ async function getOpenAIResponseAndTools(userMessage, conversationId) {
         // *** Check if the response contains tool calls ***
         if (responseMessage.tool_calls && responseMessage.tool_calls.length > 0) {
             const toolCall = responseMessage.tool_calls[0]; // Assuming one tool call for now
-            console.log(`✅ OpenAI requested tool call: ${toolCall.function.name}`);
+            console.log(`✅ OpenAI decided to call tool: ${toolCall.function.name}`);
 
             if (toolCall.function.name === "findReminders") {
                 try {
@@ -164,7 +167,6 @@ async function getOpenAIResponseAndTools(userMessage, conversationId) {
         // Fallback if the response structure is unexpected
         else {
             console.warn("⚠️ OpenAI response had no content and no tool calls.");
-            // Provide a generic fallback reply
             return { type: 'content', content: "معلش، مش عارف أرد إزاي. ممكن تجرب تاني؟" };
         }
 
@@ -181,11 +183,12 @@ async function getOpenAIResponseAndTools(userMessage, conversationId) {
 }
 
 // --- Reminder Parsing Function (Kept separate, uses JSON mode, not tools) ---
-// This function remains unchanged from the last working version
+// This function remains for handling direct reminder commands like "ذكرني..."
 async function parseReminderWithOpenAI(userMessage, conversationId) {
-    if (!OPENAI_API_KEY) { /* ... */ return null; }
-    if (!conversationId) { /* ... */ return null; }
-    const history = await getRecentHistory(conversationId); // Uses HISTORY_LIMIT (4)
+    if (!OPENAI_API_KEY) { /* ... key check ... */ return null; }
+    if (!conversationId) { /* ... id check ... */ return null; }
+    // Use HISTORY_LIMIT for parsing context as well
+    const history = await getRecentHistory(conversationId);
     const nowInCairo = DateTime.now().setZone(TIME_ZONE);
     const currentTimeString = nowInCairo.toFormat("yyyy-MM-dd HH:mm ZZZZ");
     const systemPrompt = reminderParserSystemPromptTemplate.replace('{currentTime}', currentTimeString);
@@ -193,6 +196,7 @@ async function parseReminderWithOpenAI(userMessage, conversationId) {
     try {
         console.log(`🤖 Sending reminder parse query (JSON Mode) with ${history.length} history messages.`);
         const response = await axios.post(OPENAI_API_URL, { model: OPENAI_MODEL, messages: messages, temperature: 0.1, max_tokens: 150, response_format: { type: "json_object" } }, { headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'application/json' } });
+        // --- Rest of JSON parsing logic --- (Same as before)
         let responseData = response.data.choices?.[0]?.message?.content; console.log(`🤖 OpenAI raw parsing response: "${responseData}"`); if (!responseData) { console.warn("⚠️ OpenAI parsing response empty."); return null; } let parsedJson; try { if (typeof responseData === 'string') { if (responseData.trim().toLowerCase() === 'null') { console.log("⚠️ OpenAI returned null string."); return null; } responseData = responseData.replace(/^```json\s*/, '').replace(/\s*```$/, ''); parsedJson = JSON.parse(responseData); } else if (typeof responseData === 'object' && responseData !== null) { parsedJson = responseData; } else { console.warn("⚠️ Unexpected OpenAI response type."); return null; } if (parsedJson && typeof parsedJson.reminder_text === 'string' && typeof parsedJson.local_datetime_iso === 'string') { if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(parsedJson.local_datetime_iso)) { console.log("✅ Successfully parsed JSON from OpenAI:", parsedJson); return parsedJson; } else { console.warn("⚠️ OpenAI JSON date format incorrect:", parsedJson.local_datetime_iso); return null; } } else { console.warn("⚠️ OpenAI JSON missing fields/wrong types:", parsedJson); return null; } } catch (jsonError) { console.error("❌ Error parsing JSON response:", jsonError.message); return null; }
     } catch (error) { /* ... API call error handling ... */ return null; }
 }
