@@ -1,7 +1,7 @@
 {
   "name": "azooz-bot",
   "version": "1.0.0",
-  "description": "WhatsApp bot with reminders",
+  "description": "WhatsApp bot with reminders using Luxon",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
@@ -13,19 +13,20 @@
     "openai",
     "reminder",
     "mongodb",
-    "node-schedule"
+    "node-schedule",
+    "luxon"
   ],
-  "author": "Your Name",
+  "author": "Ahmed Youssef",
   "license": "ISC",
   "dependencies": {
-    "axios": "^1.7.2", // Or latest
-    "dotenv": "^16.4.5", // Or latest
-    "express": "^4.19.2", // Or latest (Using 4.19.2 in logs, let's keep it)
-    "luxon": "^3.4.4", // <<<--- Added Luxon
-    "mongodb": "^6.8.0", // Or latest
-    "node-schedule": "^2.1.1" // Keep this version as it was stable
+    "axios": "^1.7.2",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "luxon": "^3.4.4",
+    "mongodb": "^6.8.0",
+    "node-schedule": "^2.1.1"
   },
   "engines": {
-    "node": "18.x" // Keep Node 18
+    "node": "18.x"
   }
 }
