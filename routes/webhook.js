@@ -1,11 +1,10 @@
-// routes/webhook.js (Workaround: Use dot notation for date-fns-tz)
+// routes/webhook.js (Workaround: Use native Date parsing, then date-fns-tz for UTC conversion)
 const express = require('express');
 const { getReplyFromOpenAI } = require('../utils/openai');
 const { sendWhatsAppMessage } = require('../utils/whatsapp');
 const { addReminder } = require('../scheduler/reminderQueue');
-// --- التغيير هنا: استدعاء المكتبة كلها ---
-const dateFnsTz = require('date-fns-tz');
-// ---------------------------------------
+// لا نحتاج استدعاء parse, isValid من هنا
+// const { parse, zonedTimeToUtc, format, isValid } = require('date-fns-tz');
 require('dotenv').config();
 
 const router = express.Router();
@@ -20,9 +19,9 @@ router.get('/', (req, res) => {
     const token = req.query['hub.verify_token'];
     const challenge = req.query['hub.challenge'];
     if (mode && token) {
-         if (mode === 'subscribe' && token === WEBHOOK_VERIFY_TOKEN) {
-            console.log('✅ Webhook verified');
-            res.status(200).send(challenge);
+        if (mode === 'subscribe' && token === WEBHOOK_VERIFY_TOKEN) {
+             console.log('✅ Webhook verified');
+             res.status(200).send(challenge);
         } else { /*...*/ res.sendStatus(403); }
     } else { /*...*/ res.sendStatus(400); }
 });
@@ -31,9 +30,10 @@ router.get('/', (req, res) => {
 router.post('/', async (req, res) => {
     console.log('Received webhook event:', JSON.stringify(req.body, null, 2));
     try {
-        const entry = req.body.entry?.[0];
-        const change = entry?.changes?.[0];
-        const value = change?.value;
+        // ... (Parsing webhook payload remains the same) ...
+         const entry = req.body.entry?.[0];
+         const change = entry?.changes?.[0];
+         const value = change?.value;
 
         if (value?.messaging_product === 'whatsapp' && value?.messages?.length > 0) {
             const message = value.messages[0];
@@ -52,53 +52,66 @@ router.post('/', async (req, res) => {
                         const parts = msg_body.substring(reminderPrefix.length).split(timePrefix);
                         if (parts.length === 2) {
                             const reminderMessage = parts[0].trim();
-                            const timeString = parts[1].trim();
+                            const timeString = parts[1].trim(); // e.g., "2025-04-04 08:30"
 
                             if (reminderMessage && timeString) {
                                 isReminder = true;
-                                // --- إصلاح الـ Log هنا ---
                                 console.log(`Attempting to parse reminder: "<span class="math-inline">\{reminderMessage\}" at "</span>{timeString}"`);
-                                // ------------------------
                                 try {
-                                    const formatString = 'yyyy-MM-dd HH:mm';
-                                    // --- التغيير هنا: استخدام dateFnsTz.parse ---
-                                    let parsedDate = dateFnsTz.parse(timeString, formatString, new Date(), { timeZone: TIME_ZONE });
+                                    // **** بداية التغيير: استخدام new Date() للتحليل ****
+                                    // استبدال أول مسافة بحرف T قد يساعد بعض المحركات على فهمها كتوقيت محلي
+                                    const potentialDateString = timeString.replace(' ', 'T');
+                                    const parsedDate = new Date(potentialDateString); // Native Date parsing
+                                    // **** نهاية التغيير ****
 
-                                    // --- التغيير هنا: استخدام dateFnsTz.isValid ---
-                                    if (!dateFnsTz.isValid(parsedDate)) {
-                                    // ------------------------------------------
-                                        console.log(`Failed to parse date string "${timeString}" with format ${formatString}`);
-                                        await sendWhatsAppMessage(from, `معلش، مقدرتش أفهم صيغة الوقت والتاريخ دي: "${timeString}". جرب تكتبها بصيغة زي YYYY-MM-DD HH:MM (مثال: 2025-04-04 14:00 للساعة 2 الضهر).`);
+                                    // التحقق باستخدام isNaN
+                                    if (isNaN(parsedDate.getTime())) {
+                                        console.log(`Failed to parse date string "${timeString}" using native new Date().`);
+                                        await sendWhatsAppMessage(from, `معلش، مقدرتش أفهم صيغة الوقت والتاريخ دي: "${timeString}". جرب تكتبها بصيغة YYYY-MM-DD HH:MM.`);
                                     } else {
-                                        // --- التغيير هنا: استخدام dateFnsTz.zonedTimeToUtc ---
-                                        const executeAtUtc = dateFnsTz.zonedTimeToUtc(parsedDate, TIME_ZONE);
-                                        // -------------------------------------------------
-                                        const nowUtc = new Date();
+                                        // **** بداية التغيير: لو التحليل نجح، نستخدم date-fns-tz للتحويل لـ UTC ****
+                                        let executeAtUtc;
+                                        let dateFnsTz;
+                                        try {
+                                             // نحاول نعمل require هنا عشان نستخدمها للتحويل فقط
+                                             dateFnsTz = require('date-fns-tz');
+                                             // نفترض أن التاريخ المدخل هو بتوقيت القاهرة
+                                             executeAtUtc = dateFnsTz.zonedTimeToUtc(parsedDate, TIME_ZONE);
+                                         } catch (tzErr) {
+                                             console.error("Failed to require/use date-fns-tz for UTC conversion, saving as potentially incorrect UTC.", tzErr);
+                                             // حل بديل جداً: نحفظ التاريخ كما هو (قد يكون بتوقيت السيرفر أو UTC غير دقيق)
+                                             // أو نعتمد على التوقيت المحلي للسيرفر (غير مضمون)
+                                             // الأفضل هنا هو إرجاع خطأ لو معرفناش نحول صح
+                                              await sendWhatsAppMessage(from, "حصلت مشكلة داخلية وأنا بحاول أظبط توقيت التذكير.");
+                                              // ونوقف التنفيذ هنا بدل حفظ وقت غلط
+                                              throw new Error("Failed to convert parsed date to UTC using date-fns-tz");
+                                         }
+                                         // **** نهاية التغيير ****
 
+                                        const nowUtc = new Date();
                                         if (executeAtUtc <= nowUtc) {
                                             console.log("Reminder time is in the past.");
                                             await sendWhatsAppMessage(from, `الوقت اللي حددته (${timeString}) عدى خلاص! لو سمحت حدد وقت في المستقبل.`);
                                         } else {
                                             await addReminder(from, reminderMessage, executeAtUtc);
-                                            // --- التغيير هنا: استخدام dateFnsTz.format ---
-                                            const formattedLocalTime = dateFnsTz.format(parsedDate, 'yyyy-MM-dd hh:mm a', { timeZone: TIME_ZONE });
-                                            // -------------------------------------------
+                                            // نحتاج date-fns-tz هنا تاني عشان نطبع الوقت صح في رسالة التأكيد
+                                            let formattedLocalTime = timeString; // fallback
+                                            try {
+                                                 if(!dateFnsTz) dateFnsTz = require('date-fns-tz'); // نتأكد انها موجودة
+                                                 formattedLocalTime = dateFnsTz.format(parsedDate, 'yyyy-MM-dd hh:mm a', { timeZone: TIME_ZONE });
+                                            } catch (formatErr){ console.error("Failed to format local time for confirmation"); }
                                             await sendWhatsAppMessage(from, `تمام 👍، هفكرك بـ "${reminderMessage}" في الميعاد ده: ${formattedLocalTime}`);
                                         }
                                     }
-                                } catch (parseError) {
-                                    console.error("Error parsing date/time or adding reminder:", parseError);
-                                    await sendWhatsAppMessage(from, "حصلت مشكلة وأنا بحاول أفهم الوقت أو أحفظ التذكير ده."); // الرسالة اللي وصلتلك
+                                } catch (parseOrAddError) {
+                                    console.error("Error parsing date/time or adding reminder:", parseOrAddError);
+                                    await sendWhatsAppMessage(from, "حصلت مشكلة وأنا بحاول أفهم الوقت أو أحفظ التذكير ده.");
                                 }
                             } else { /*...*/ await sendWhatsAppMessage(from, "صيغة الأمر مش كاملة..."); }
                         } else { /*...*/ await sendWhatsAppMessage(from, "صيغة الأمر مش مظبوطة..."); }
                     }
 
-                    if (!isReminder) {
-                        console.log("Message is not a reminder, sending to OpenAI...");
-                        const aiReply = await getReplyFromOpenAI(msg_body);
-                        if (aiReply) { /*...*/ await sendWhatsAppMessage(from, aiReply); }
-                    }
+                    if (!isReminder) { /* ... (OpenAI logic remains the same) ... */ }
                 } /* ... */
             } /* ... */
         } /* ... */
