@@ -1,74 +1,114 @@
-// utils/database.js (أضف هذه الدالة وعدل الـ exports)
-// ... (الكود بتاع connectDB و getDb و getRemindersCollection زي ما هو فوق) ...
+// جوه router.post في ملف routes/webhook.js
+// قبل: if (!reminderProcessed && !handledSpecifically) { /* General OpenAI reply */ }
 
-/** // <<<--- الدالة الجديدة ---<<<
- * Finds reminders for a specific user based on date or subject.
- * @param {object} options
- * @param {string} options.conversationId - The user's WhatsApp ID.
- * @param {Date} [options.queryDate] - Optional: The specific date to search for (start of day, UTC).
- * @param {string} [options.querySubject] - Optional: A keyword to search within the reminder message.
- * @returns {Promise<Array<object>>} - A promise that resolves to an array of reminder documents.
- */
-async function findReminders({ conversationId, queryDate, querySubject }) {
-    console.log(`ℹ️ Finding reminders for ${conversationId} with criteria: Date=${queryDate ? queryDate.toISOString().split('T')[0] : 'N/A'}, Subject=${querySubject || 'N/A'}`);
-    try {
-        const db = getDb();
-        if (!db) {
-            console.warn("⚠️ DB instance not available when trying to find reminders.");
-            return [];
-        }
-        const collection = getRemindersCollection(); // Use existing function to get 'reminders' collection
+                    // 4. NEW: Check for Schedule Query (if not reminder and not specific time query)
+                    //    <<<--- إضافة هذا الجزء كاملاً ---<<<
+                    if (!reminderProcessed && !handledSpecifically) {
+                        const lowerMsg = msg_body.toLowerCase();
+                        let queryDate = null;
+                        let querySubject = null;
+                        let isScheduleQuery = false;
+                        let extractedDatePhrase = null;
 
-        let query = { to: conversationId }; // Always filter by user
+                        // --- محاولة بسيطة لاستخلاص التاريخ والموضوع ---
+                        // يبحث عن كلمات تدل على استعلام + كلمة تدل على زمن
+                        const scheduleKeywords = ["مواعيد", "عندي ايه", "في ايه", "ايه جدول", "ايه تذكيرات"];
+                        const dateKeywords = ["بكرة", "غدا", "النهاردة", "اليوم"]; // ممكن نضيف أيام الأسبوع بعدين
 
-        // Build query based on provided date
-        if (queryDate instanceof Date && !isNaN(queryDate)) {
-            // Create a date range for the entire day in UTC
-            // The date received should represent the start of the target day in local time,
-            // we convert it to UTC start and end of day for MongoDB query.
-            // Note: This assumes queryDate is already set to the START of the target day.
-            const dateStart = new Date(queryDate); // Assuming queryDate is start of day UTC (or needs conversion)
-            // Let's ensure it's start of day UTC
-            dateStart.setUTCHours(0, 0, 0, 0);
-            const dateEnd = new Date(dateStart);
-            dateEnd.setUTCDate(dateStart.getUTCDate() + 1); // Start of the *next* day UTC
+                        // Check if message contains schedule keywords
+                        if (scheduleKeywords.some(keyword => lowerMsg.includes(keyword))) {
+                            isScheduleQuery = true;
+                            // Try to extract a simple date phrase
+                            if (lowerMsg.includes("بكرة") || lowerMsg.includes("غدا")) {
+                                extractedDatePhrase = "بكرة";
+                                queryDate = DateTime.now().setZone(TIME_ZONE).plus({ days: 1 }).startOf('day').toJSDate();
+                            } else if (lowerMsg.includes("النهاردة") || lowerMsg.includes("اليوم")) {
+                                // Check if it's asking about "today" or "that day" (context needed)
+                                if (lowerMsg.includes("اليوم ده") || lowerMsg.includes("اليوم دا")) {
+                                     // Needs context - for now, we don't handle this complex case reliably here
+                                     // We rely on the general AI to potentially understand it better with history.
+                                     // Let's make it ask for clarification for now if "اليوم ده" is used in query.
+                                     isScheduleQuery = true; // Still mark as query intent
+                                     queryDate = null; // Force clarification
+                                     extractedDatePhrase = "اليوم ده";
+                                } else {
+                                    extractedDatePhrase = "النهاردة";
+                                    queryDate = DateTime.now().setZone(TIME_ZONE).startOf('day').toJSDate();
+                                }
+                            }
+                            // Add more date phrase checks here (e.g., day names, specific dates - requires more parsing)
+                        }
 
-            query.executeAt = { $gte: dateStart, $lt: dateEnd }; // Find reminders within that UTC day
-            console.log(`   Querying date range UTC: ${dateStart.toISOString()} to ${dateEnd.toISOString()}`);
-        }
-
-        // Build query based on provided subject (case-insensitive)
-        if (querySubject && typeof querySubject === 'string' && querySubject.trim().length > 0) {
-            // Escape special regex characters to allow searching for them literally
-            const escapedSubject = querySubject.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            query.message = { $regex: escapedSubject, $options: 'i' }; // Case-insensitive regex search
-            console.log(`   Querying subject regex: /${escapedSubject}/i`);
-        }
-
-        // Avoid running query if no specific criteria (date or subject) is given
-        // (We should always have conversationId, so check if other keys exist)
-        if (Object.keys(query).length <= 1) {
-             console.log("⚠️ findReminders called without specific date or subject criteria.");
-             // Depending on desired behavior, we might return an empty array or a specific indicator
-             return []; // Return empty array if no specific criteria provided
-        }
+                        // Check for questions like "When is X reminder?"
+                         const subjectQueryMatch = msg_body.match(/^(?:امتى|معاد|تذكير)\s+(.+)/i);
+                         if (subjectQueryMatch && subjectQueryMatch[1]) {
+                             querySubject = subjectQueryMatch[1].replace(/[؟?]/g, '').trim(); // Remove question marks
+                             isScheduleQuery = true;
+                             // If subject query, don't assume a date unless mentioned
+                             // queryDate = null; // Let findReminders search all dates for this subject
+                         } else if (lowerMsg.includes("بتاع السفر") && !querySubject && isScheduleQuery) {
+                              // Handle "travel day" context explicitly as subject if schedule query detected
+                              querySubject = "طيارة"; // Assume subject based on keyword
+                         }
 
 
-        // Execute the query, sort by time, limit results
-        const reminders = await collection.find(query)
-            .sort({ executeAt: 1 }) // Sort reminders chronologically
-            .limit(20) // Limit the number of results to avoid very long messages
-            .toArray();
+                        // --- تنفيذ الاستعلام لو الشروط متحققة ---
+                        // Execute only if it seems like a schedule query AND we have a date OR a subject
+                        if (isScheduleQuery && (queryDate || querySubject)) {
+                            console.log(`ℹ️ Detected schedule query. Date: ${queryDate ? queryDate.toISOString().split('T')[0] : 'N/A'}, Subject: ${querySubject || 'N/A'}`);
+                            handledSpecifically = true; // Mark as handled
 
-        console.log(`✅ Found ${reminders.length} matching reminders.`);
-        return reminders; // Return the array of reminder documents found
+                            // Call the new database function to find reminders
+                            const reminders = await findReminders({ conversationId: from, queryDate, querySubject });
 
-    } catch (error) {
-        console.error(`❌ Error finding reminders for ${conversationId}:`, error);
-        return []; // Return empty array in case of database errors
-    }
-}
+                            // Format the reply based on results
+                            let replyMsg = "";
+                            if (reminders.length > 0) {
+                                replyMsg = `تمام، دي المواعيد المسجلة `;
+                                if (queryDate) {
+                                     replyMsg += `ليوم ${extractedDatePhrase || DateTime.fromJSDate(queryDate).setZone(TIME_ZONE).toFormat('yyyy-MM-dd')} `;
+                                }
+                                if (querySubject) {
+                                     replyMsg += `بخصوص "${querySubject}" `;
+                                }
+                                replyMsg += `هي:\n`;
 
-// --- تعديل سطر module.exports ---
-// Export the necessary functions, including the new findReminders
-module.exports = { connectDB, getDb, getRemindersCollection, findReminders }; // Add findReminders here
+                                reminders.forEach(r => {
+                                    // Format time using Luxon
+                                    const localTime = DateTime.fromJSDate(r.executeAt, { zone: 'utc' }).setZone(TIME_ZONE);
+                                    replyMsg += `- "${r.message}" الساعة ${localTime.toFormat('hh:mm a', { locale: 'ar-EG' })}\n`;
+                                });
+                            } else {
+                                // No reminders found message
+                                replyMsg = `تمام، بصيت معنديش أي مواعيد مسجلة ليك `;
+                                 if (queryDate) {
+                                     replyMsg += `ليوم ${extractedDatePhrase || DateTime.fromJSDate(queryDate).setZone(TIME_ZONE).toFormat('yyyy-MM-dd')} `;
+                                 }
+                                 if (querySubject) {
+                                     replyMsg += `بخصوص "${querySubject}" `;
+                                 }
+                                replyMsg += `حالياً.`;
+                            }
+                            // Send the formatted reply
+                            await sendWhatsAppMessage(from, replyMsg.trim());
+
+                        } else if (isScheduleQuery) {
+                             // Detected schedule query intent but couldn't extract criteria
+                             console.log("ℹ️ Detected vague schedule query, asking for clarification.");
+                             handledSpecifically = true;
+                             await sendWhatsAppMessage(from, "أفندم؟ بتسأل عن مواعيد يوم إيه أو بخصوص إيه بالظبط؟");
+                        }
+                    }
+                    //    <<<--- نهاية الجزء المضاف ---<<<
+
+                    // 5. Fallback General Reply (The condition must include !handledSpecifically)
+                    if (!reminderProcessed && !handledSpecifically) {
+                        // ... (الكود القديم بتاع الرد العام من OpenAI زي ما هو) ...
+                        console.log("💬 Message not handled above, sending to OpenAI for general reply...");
+                        const aiReply = await getReplyFromOpenAI(msg_body, from);
+                        if (aiReply) {
+                            await sendWhatsAppMessage(from, aiReply);
+                        } else {
+                            console.warn("⚠️ No reply generated by OpenAI for general query.");
+                        }
+                    }
