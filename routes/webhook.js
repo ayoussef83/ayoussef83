@@ -1,66 +1,26 @@
-// routes/webhook.js (Modified to use OpenAI for parsing)
-const express = require('express');
-// Import BOTH functions from utils/openai now
-const { getReplyFromOpenAI, parseReminderWithOpenAI } = require('../utils/openai');
-const { sendWhatsAppMessage } = require('../utils/whatsapp');
-const { addReminder } = require('../scheduler/reminderQueue');
-const { DateTime } = require('luxon');
-
-const router = express.Router();
-
-const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN;
-const TIME_ZONE = 'Africa/Cairo'; // Ensure consistency
-
-// --- Verification Endpoint --- (Keep as is)
-router.get('/', (req, res) => {
-    const mode = req.query['hub.mode'];
-    const token = req.query['hub.verify_token'];
-    const challenge = req.query['hub.challenge'];
-    if (mode && token) {
-        if (mode === 'subscribe' && token === WEBHOOK_VERIFY_TOKEN) {
-            console.log('✅ Webhook verified');
-            res.status(200).send(challenge);
-        } else {
-            console.log('❌ Webhook verification failed - Incorrect Token');
-            res.sendStatus(403);
-        }
-    } else {
-        console.log('❌ Webhook verification failed - Missing mode or token');
-        res.sendStatus(400);
-    }
-});
-
-// --- Message Handler Endpoint ---
-router.post('/', async (req, res) => {
-    console.log('\n--- Incoming Webhook Event ---');
-    console.log(JSON.stringify(req.body, null, 2));
-    console.log('------------------------------');
-
-    try { // Outer try block
-        const entry = req.body.entry?.[0];
-        const change = entry?.changes?.[0];
-        const value = change?.value;
-
-        if (value?.messaging_product === 'whatsapp' && value?.messages?.length > 0) {
-            const message = value.messages[0];
-            const from = message.from;
-
-            if (message.type === 'text') {
-                const msg_body = message.text?.body?.trim();
+// ... (الكود اللي قبله زي ما هو جوه الـ POST handler) ...
 
                 if (msg_body && from) {
                     console.log(`📩 Received text message from ${from}: "${msg_body}"`);
 
                     // --- MODIFIED LOGIC STARTS HERE ---
-                    const reminderKeyword = "ذكرني"; // Can be expanded later
+                    // Define multiple keywords for triggering reminder parsing
+                    // ممكن تزود أو تغير في الليستة دي زي ما تحب
+                    const reminderKeywords = ["ذكرني", "فكرني", "ماتنساش", "خليني افتكر"];
                     let reminderProcessed = false; // Flag to track if we handled it
 
-                    // Check if message starts with the keyword (case-insensitive)
-                    if (msg_body.toLowerCase().startsWith(reminderKeyword.toLowerCase())) {
-                        console.log("ℹ️ Potential reminder command. Parsing with OpenAI...");
-                        reminderProcessed = true; // Mark as handled (even if parsing fails)
+                    // Check if the message starts with ANY of the keywords (case-insensitive)
+                    const startsWithReminderKeyword = reminderKeywords.some(keyword =>
+                        // بنحول الكلمة المفتاحية والرسالة لـ lowercase عشان نتجاهل فرق الحروف الكبيرة والصغيرة
+                        msg_body.toLowerCase().startsWith(keyword.toLowerCase())
+                    );
 
-                        // Call the new OpenAI parsing function
+                    // لو الرسالة بتبدأ بأي كلمة من الليستة
+                    if (startsWithReminderKeyword) {
+                        console.log(`ℹ️ Detected potential reminder command (using '${msg_body.split(' ')[0]}'). Attempting parsing with OpenAI...`); // Log which keyword was detected
+                        reminderProcessed = true; // بنعتبر إننا حاولنا نعالجها كتذكير
+
+                        // Call the OpenAI parsing function (زي ما هي من المرة اللي فاتت)
                         const parsedReminder = await parseReminderWithOpenAI(msg_body);
 
                         // Check if parsing was successful and returned valid data
@@ -109,11 +69,11 @@ router.post('/', async (req, res) => {
                             console.warn("⚠️ OpenAI could not parse the reminder details confidently.");
                             await sendWhatsAppMessage(from, "معلش، حاولت أفهم الوقت والتاريخ من كلامك بس متلخبط شوية. 🤔 ممكن تكتبهولي بصيغة أوضح أو تستخدم الصيغة دي: YYYY-MM-DD HH:MM ؟");
                         }
-                    } // End if (msg_body.startsWith(reminderKeyword))
+                    } // End if (startsWithReminderKeyword)
 
                     // If the message wasn't identified and processed as a reminder, treat it as a general query
                     if (!reminderProcessed) {
-                        console.log("💬 Message not a reminder, sending to OpenAI for general reply...");
+                        console.log("💬 Message not a reminder command, sending to OpenAI for general reply...");
                         const aiReply = await getReplyFromOpenAI(msg_body);
                         if (aiReply) {
                             await sendWhatsAppMessage(from, aiReply);
@@ -126,28 +86,4 @@ router.post('/', async (req, res) => {
                     // --- MODIFIED LOGIC ENDS HERE ---
 
                 } else { // else for if(msg_body && from)
-                    console.warn("⚠️ Webhook received empty message body or missing sender number.");
-                }
-            } else { // else for if (message.type === 'text')
-                console.log(`➡️ Received non-text message type: ${message.type} from ${from}`);
-                // Optionally reply for non-text messages
-                // await sendWhatsAppMessage(from, "أنا حالياً بفهم الرسايل النصية بس.");
-            }
-        } else { // else for if (value?.messaging_product === 'whatsapp' ...)
-            console.log('✅ Received event is not an incoming WhatsApp message or structure is different.');
-        }
-
-        // Acknowledge receipt to Meta quickly (important!)
-        res.sendStatus(200);
-
-    } // End Outer Try
-    catch (err) { // Outer Catch block
-        console.error("❌ Unexpected error in POST /webhook handler:", err);
-        // Still acknowledge to prevent Meta from retrying the same broken event
-        if (!res.headersSent) { // Avoid error if already sent status
-             res.sendStatus(200);
-        }
-    }
-});
-
-module.exports = router;
+                  // ... (باقي الكود زي ما هو) ...
