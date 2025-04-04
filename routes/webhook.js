@@ -1,4 +1,4 @@
-// routes/webhook.js (Complete - Includes Schedule Query Logic)
+// routes/webhook.js (Complete - Includes Simple Schedule Query Logic)
 
 // --- Core Dependencies ---
 const express = require('express');
@@ -21,7 +21,7 @@ const TIME_ZONE = process.env.TIME_ZONE || 'Africa/Cairo';
 
 // --- GET /webhook (Verification) ---
 router.get('/', (req, res) => {
-    // ... (Verification logic - unchanged from previous versions) ...
+    // ... (Verification logic - unchanged) ...
     const mode = req.query['hub.mode']; const token = req.query['hub.verify_token']; const challenge = req.query['hub.challenge']; console.log('Received GET /webhook verification request:'); console.log(`Mode: ${mode}, Token: ${token ? '******' : 'Not provided'}, Challenge: ${challenge}`); if (mode && token) { if (mode === 'subscribe' && token === WEBHOOK_VERIFY_TOKEN) { console.log('✅ Webhook verified successfully!'); res.status(200).send(challenge); } else { console.log('❌ Webhook verification failed - Incorrect Token'); res.sendStatus(403); } } else { console.log('❌ Webhook verification failed - Missing mode or token'); res.sendStatus(400); }
 });
 
@@ -47,7 +47,7 @@ router.post('/', async (req, res) => {
                     console.log(`📩 Received text message from ${from}: "${msg_body}"`);
 
                     // Log incoming message
-                    try { /* ... (logging code as before, uses getDb) ... */ const db = getDb(); if (db) { await db.collection('message_history').insertOne({ conversationId: from, role: 'user', content: msg_body, timestamp: new Date() }); console.log("📝 User message saved to history."); } else { console.warn("⚠️ DB instance unavailable for user history."); } } catch (dbError) { console.error("❌ Error saving user message:", dbError); }
+                    try { const db = getDb(); if (db) { await db.collection('message_history').insertOne({ conversationId: from, role: 'user', content: msg_body, timestamp: new Date() }); console.log("📝 User message saved to history."); } else { console.warn("⚠️ DB instance unavailable for user history."); } } catch (dbError) { console.error("❌ Error saving user message:", dbError); }
 
                     // --- Message Processing Logic ---
                     let reminderProcessed = false;
@@ -64,7 +64,7 @@ router.post('/', async (req, res) => {
                         if (parsedReminder /*...etc...*/) { /* ... process valid reminder logic ... */ const { reminder_text, local_datetime_iso } = parsedReminder; console.log(`✅ OpenAI parsed: Text='${reminder_text}', Time='${local_datetime_iso}'`); try { const formatString = 'yyyy-MM-dd HH:mm'; const localDateTime = DateTime.fromFormat(local_datetime_iso, formatString, { zone: TIME_ZONE }); if (!localDateTime.isValid) { console.warn(`⚠️ Failed date validation from OpenAI "${local_datetime_iso}".`); await sendWhatsAppMessage(from, `معلش، الوقت فيه مشكلة: "${local_datetime_iso}".\nالسبب: ${localDateTime.invalidReason}.\nجرب صيغة<y_bin_46>-MM-DD HH:MM`); } else { const executeAtUtc = localDateTime.toUTC(); const nowUtc = DateTime.utc(); if (executeAtUtc <= nowUtc.plus({ minutes: 1 })) { console.warn("⚠️ Reminder time is in the past."); await sendWhatsAppMessage(from, `الوقت (${local_datetime_iso}) عدى. حدد وقت في المستقبل.`); } else { const executeAtUtcDate = executeAtUtc.toJSDate(); await addReminder(from, reminder_text, executeAtUtcDate); const formattedLocalTime = localDateTime.toFormat('yyyy-MM-dd hh:mm a'); await sendWhatsAppMessage(from, `تمام 👍، هفكرك بـ "${reminder_text}" في الميعاد ده: ${formattedLocalTime} بتوقيت القاهرة`); console.log(`✅ Reminder scheduled for ${from}.`); } } } catch (validationError) { console.error("❌ Error validating date:", validationError); await sendWhatsAppMessage(from, "حصلت مشكلة وأنا بتأكد من الوقت."); } } else { console.warn("⚠️ OpenAI could not parse reminder details."); await sendWhatsAppMessage(from, "معلش، حاولت أفهم الوقت بس متلخبط. 🤔 ممكن تكتبه بصيغة<y_bin_46>-MM-DD HH:MM ؟"); }
                     } // END Reminder Check
 
-                    // --- Check specific queries only if not handled as reminder ---
+                    // --- Check specific non-reminder queries only if not handled as reminder ---
                     if (!reminderProcessed) {
 
                         // 2. Check for Time Query
@@ -82,39 +82,37 @@ router.post('/', async (req, res) => {
                             let querySubject = null;
                             let isScheduleQuery = false;
                             let extractedDatePhrase = null;
-                            const scheduleKeywords = ["مواعيد", "عندي ايه", "في ايه", "ايه جدول", "ايه تذكيرات", "جدولي"]; // Added "جدولي"
-                            // Check for "When is X reminder?" pattern
+                            const scheduleKeywords = ["مواعيد", "عندي ايه", "في ايه", "ايه جدول", "ايه تذكيرات", "جدولي"];
                             const subjectQueryMatch = msg_body.match(/^(?:امتى|معاد|تذكير)\s+(.+)/i);
-                             // Check for keywords indicating a schedule query
+
+                            // Basic intent detection for schedule query
                             if (scheduleKeywords.some(keyword => lowerMsgBody.includes(keyword)) || subjectQueryMatch ) {
                                  isScheduleQuery = true;
-                                 // --- Basic Date Extraction (Needs Improvement for Production) ---
+                                 // Basic date extraction (Needs Improvement for Production)
                                 if (lowerMsgBody.includes("بكرة") || lowerMsgBody.includes("غدا")) {
                                     extractedDatePhrase = "بكرة"; queryDate = DateTime.now().setZone(TIME_ZONE).plus({ days: 1 }).startOf('day').toJSDate();
                                 } else if (lowerMsgBody.includes("النهاردة") || lowerMsgBody.includes("اليوم")) {
-                                     if (!(lowerMsgBody.includes("اليوم ده") || lowerMsgBody.includes("اليوم دا"))) { // Only parse if it's explicitly "today", not "this day"
+                                     if (!(lowerMsgBody.includes("اليوم ده") || lowerMsgBody.includes("اليوم دا"))) {
                                          extractedDatePhrase = "النهاردة"; queryDate = DateTime.now().setZone(TIME_ZONE).startOf('day').toJSDate();
                                      } else {
-                                         extractedDatePhrase = "اليوم ده"; queryDate = null; // Rely on subject or ask clarification
+                                         extractedDatePhrase = "اليوم ده"; queryDate = null; // Force clarification
                                      }
-                                 }
-                                 // TODO: Add parsing for specific dates "MM/DD", "DD Month", day names etc. using Luxon or regex
+                                 } // TODO: Add more robust date parsing here (specific dates, day names etc.)
 
-                                 // --- Basic Subject Extraction ---
-                                 if (subjectQueryMatch && subjectQueryMatch[1]) {
-                                      querySubject = subjectQueryMatch[1].replace(/[؟?]/g, '').trim();
-                                 } else if (lowerMsgBody.includes("بتاع السفر")) { querySubject = "طيارة"; } // Simple context carry-over attempt
+                                 // Basic subject extraction
+                                 if (subjectQueryMatch && subjectQueryMatch[1]) { querySubject = subjectQueryMatch[1].replace(/[؟?]/g, '').trim(); }
+                                 else if (lowerMsgBody.includes("بتاع السفر")) { querySubject = "طيارة"; }
                                  // TODO: Add more robust subject extraction
 
                                  // --- Execute schedule query if criteria were extracted ---
                                  if (queryDate || querySubject) {
                                      console.log(`ℹ️ Handling schedule query. Date: ${queryDate ? queryDate.toISOString().split('T')[0] : 'N/A'}, Subject: ${querySubject || 'N/A'}`);
-                                     handledSpecifically = true;
+                                     handledSpecifically = true; // Mark as handled
 
                                      // Call the function from database.js to find reminders
                                      const reminders = await findReminders({ conversationId: from, queryDate, querySubject });
 
-                                     // Format the reply based on results
+                                     // Format the reply based on found reminders
                                      let replyMsg = "";
                                      if (reminders.length > 0) {
                                          replyMsg = `تمام، دي المواعيد المسجلة `;
@@ -142,17 +140,17 @@ router.post('/', async (req, res) => {
                                  }
                              } // End if (isScheduleQuery check)
                         } // End else (if not time query)
-                    } // End if (!reminderProcessed)
+                    } // End if (!reminderProcessed) check
 
                     // 3. Fallback General Reply
-                    // Only if NOT reminder AND NOT handled specifically
+                    // Only if NOT reminder AND NOT handled specifically by other logic
                     if (!reminderProcessed && !handledSpecifically) {
                         console.log("💬 Fallback: Sending to OpenAI for general reply...");
-                        const aiReply = await getReplyFromOpenAI(msg_body, from);
+                        const aiReply = await getReplyFromOpenAI(msg_body, from); // Pass history context
                         if (aiReply) { await sendWhatsAppMessage(from, aiReply); }
-                        else { console.warn("⚠️ No general reply from OpenAI."); }
+                        else { console.warn("⚠️ No reply generated by OpenAI for general query."); }
                     }
-                    // --- End Message Processing Logic ---
+                    // --- End of Message Processing Logic ---
 
                 } else { console.warn("⚠️ Empty msg_body or missing 'from'."); }
             } else { console.log(`➡️ Received non-text message: ${message.type}`); }
