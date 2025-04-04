@@ -12,7 +12,7 @@ const OPENAI_API_URL = process.env.OPENAI_API_URL || 'https://api.openai.com/v1/
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4-turbo';
 const TIME_ZONE = process.env.TIME_ZONE || 'Africa/Cairo';
 // --- <<< تم تغيير القيمة الافتراضية هنا إلى 2 >>> ---
-const HISTORY_LIMIT = parseInt(process.env.HISTORY_LIMIT || '2', 10); // الافتراضي آخر رسالتين فقط
+const HISTORY_LIMIT = parseInt(process.env.HISTORY_LIMIT || '4', 10); // الافتراضي آخر رسالتين فقط
 
 // --- Function to read prompt files safely ---
 function readPromptFromFile(fileName) {
