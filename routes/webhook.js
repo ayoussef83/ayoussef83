@@ -1,200 +1,166 @@
-/// routes/webhook.js (Complete - Final Check on Requires & Includes History Logging)
+// routes/webhook.js (Complete - Corrected Structure & Final Checks)
 
 // --- Core Dependencies ---
 const express = require('express');
-const { DateTime } = require('luxon'); // Used for direct time query handling
+const { DateTime } = require('luxon');
 
 // --- Utilities & Helpers ---
-// *** تأكد إن المسارات دي صحيحة 100% بناءً على مكان الملفات عندك ***
-// Assuming webhook.js is in 'routes/' and others are in 'utils/' or 'scheduler/' at the same level as 'routes/'
-const { getReplyFromOpenAI, parseReminderWithOpenAI } = require('../utils/openai'); // Reads prompts & history now
-const { sendWhatsAppMessage } = require('../utils/whatsapp'); // Logs outgoing messages now
-const { getDb } = require('../utils/database'); // Exports getDb now
-const { addReminder } = require('../scheduler/reminderQueue'); // Needs reminderQueue.js in scheduler (adjust path if needed)
+// *** تأكد من صحة هذه المسارات بناءً على هيكل المشروع عندك ***
+const { getReplyFromOpenAI, parseReminderWithOpenAI } = require('../utils/openai');
+const { sendWhatsAppMessage } = require('../utils/whatsapp');
+const { getDb, findReminders } = require('../utils/database'); // نستدعي الدالة الجديدة هنا أيضاً
+const { addReminder } = require('../scheduler/reminderQueue'); // تأكد من المسار
 
 // --- Initialize Express Router ---
 const router = express.Router();
 
 // --- Load configuration ---
 const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN;
-const TIME_ZONE = process.env.TIME_ZONE || 'Africa/Cairo'; // Default timezone
+const TIME_ZONE = process.env.TIME_ZONE || 'Africa/Cairo';
 
 // --- GET /webhook (Verification) ---
-// Handles the initial challenge from Meta/WhatsApp to verify the webhook URL
 router.get('/', (req, res) => {
     const mode = req.query['hub.mode'];
     const token = req.query['hub.verify_token'];
     const challenge = req.query['hub.challenge'];
-
     console.log('Received GET /webhook verification request:');
-    console.log(`Mode: ${mode}, Token: ${token ? '******' : 'Not provided'}, Challenge: ${challenge}`); // Avoid logging token
-
+    console.log(`Mode: ${mode}, Token: ${token ? '******' : 'Not provided'}, Challenge: ${challenge}`);
     if (mode && token) {
-        // Check the mode and token sent are correct
         if (mode === 'subscribe' && token === WEBHOOK_VERIFY_TOKEN) {
-            // Respond with the challenge token from the request
             console.log('✅ Webhook verified successfully!');
             res.status(200).send(challenge);
         } else {
-            // Responds with '403 Forbidden' if verify tokens do not match
             console.log('❌ Webhook verification failed - Incorrect Token');
             res.sendStatus(403);
         }
     } else {
-        // Responds with '400 Bad Request' if mode or token are missing
         console.log('❌ Webhook verification failed - Missing mode or token');
         res.sendStatus(400);
     }
 });
 
 // --- POST /webhook (Message Handler) ---
-// Main endpoint to process incoming messages and events from WhatsApp
-// Marked 'async' to allow using 'await' inside
+// ** الدالة دي لازم تكون async عشان نستخدم await جواها **
 router.post('/', async (req, res) => {
     console.log('\n--- Incoming Webhook Event ---');
-    console.log(`Webhook received: Object='<span class="math-inline">\{req\.body\.object\}', Entry Count\=</span>{req.body.entry?.length}`); // Log basic info
+    console.log(`Webhook received: Object='${req.body.object}', Entry Count=${req.body.entry?.length}`);
     console.log('------------------------------');
 
-    try { // Main try block for the entire request processing
+    try { // <<< بداية الـ try block الخارجي >>>
         const entry = req.body.entry?.[0];
         const change = entry?.changes?.[0];
         const value = change?.value;
 
-        // Check if it's a valid incoming WhatsApp message event
+        // Check if it's a standard WhatsApp message
         if (value?.messaging_product === 'whatsapp' && value?.messages?.length > 0) {
             const message = value.messages[0];
-            const from = message.from; // User's WhatsApp ID (Used as conversationId)
+            const from = message.from; // Sender's WhatsApp ID (Used as conversationId)
 
             // Process only text messages
             if (message.type === 'text') {
-                const msg_body = message.text?.body?.trim(); // Get the message text
+                const msg_body = message.text?.body?.trim();
 
-                // Ensure message body and sender ID exist
                 if (msg_body && from) {
-                    console.log(`📩 Received text message from <span class="math-inline">\{from\}\: "</span>{msg_body}"`);
+                    console.log(`📩 Received text message from ${from}: "${msg_body}"`);
 
                     // --- Log incoming user message ---
                     try {
-                        const db = getDb(); // Use the imported getDb function
+                        const db = getDb();
                         if (db) {
-                            const historyCollection = db.collection('message_history');
-                            await historyCollection.insertOne({
-                                conversationId: from, role: 'user', content: msg_body, timestamp: new Date()
-                            });
+                            await db.collection('message_history').insertOne({ conversationId: from, role: 'user', content: msg_body, timestamp: new Date() });
                             console.log("📝 User message saved to history.");
-                        } else { console.warn("⚠️ DB instance not available when trying to save user message history."); }
+                        } else { console.warn("⚠️ DB instance not available for user history logging."); }
                     } catch (dbError) { console.error("❌ Error saving user message:", dbError); }
-                    // --- End Logging Incoming Message ---
 
                     // --- Message Processing Logic ---
-                    let reminderProcessed = false; // Flag: Was it handled as a reminder attempt?
-                    let handledSpecifically = false; // Flag: Was it handled by specific logic?
+                    let reminderProcessed = false;
+                    let handledSpecifically = false;
                     const reminderKeywords = ["ذكرني", "فكرني", "ماتنساش", "خليني افتكر"];
-                    const lowerMsgBody = msg_body.toLowerCase(); // Convert once for efficiency
-                    const startsWithReminderKeyword = reminderKeywords.some(keyword =>
-                        lowerMsgBody.startsWith(keyword.toLowerCase())
-                    );
+                    const lowerMsgBody = msg_body.toLowerCase();
+                    const startsWithReminderKeyword = reminderKeywords.some(keyword => lowerMsgBody.startsWith(keyword.toLowerCase()));
 
-                    // 1. Check Reminders
+                    // 1. Check for Reminder Keywords
                     if (startsWithReminderKeyword) {
                         console.log(`ℹ️ Detected reminder keyword. Parsing with OpenAI (including history)...`);
                         reminderProcessed = true;
-                        // --- Call OpenAI parser, passing 'from' for history context ---
-                        const parsedReminder = await parseReminderWithOpenAI(msg_body, from);
-
-                        // Check if OpenAI returned valid structured data
+                        const parsedReminder = await parseReminderWithOpenAI(msg_body, from); // << await is valid here
                         if (parsedReminder && parsedReminder.reminder_text && parsedReminder.local_datetime_iso) {
-                           // --- Process Valid Parsed Reminder ---
-                           const { reminder_text, local_datetime_iso } = parsedReminder;
-                           console.log(`✅ OpenAI parsed: Text='<span class="math-inline">\{reminder\_text\}', Time\='</span>{local_datetime_iso}'`);
-                           try {
-                               const formatString = 'yyyy-MM-dd HH:mm';
-                               const localDateTime = DateTime.fromFormat(local_datetime_iso, formatString, { zone: TIME_ZONE });
-                               if (!localDateTime.isValid) {
-                                   console.warn(`⚠️ Failed validation for date string from OpenAI "${local_datetime_iso}". Reason: ${localDateTime.invalidReason || 'Unknown'}`);
-                                   await sendWhatsAppMessage(from, `معلش، فهمت التذكير لكن معرفتش أظبط الوقت اللي رجع من التحليل: "${local_datetime_iso}".\nالسبب: ${localDateTime.invalidReason}.\nجرب صيغة تانية أو الصيغة الدقيقة:<y_bin_46>-MM-DD HH:MM`);
-                               } else {
-                                   const executeAtUtc = localDateTime.toUTC();
-                                   const nowUtc = DateTime.utc();
-                                   if (executeAtUtc <= nowUtc.plus({ minutes: 1 })) {
-                                       console.warn("⚠️ Parsed reminder time is in the past or too soon.");
-                                       await sendWhatsAppMessage(from, `الوقت اللي فهمته من كلامك (${local_datetime_iso} بتوقيت القاهرة) للأسف عدى أو قرب أوي. لازم تحدد وقت في المستقبل بدقيقة على الأقل.`);
-                                   } else {
-                                       const executeAtUtcDate = executeAtUtc.toJSDate();
-                                       await addReminder(from, reminder_text, executeAtUtcDate);
-                                       const formattedLocalTime = localDateTime.toFormat('yyyy-MM-dd hh:mm a');
-                                       await sendWhatsAppMessage(from, `تمام 👍، هفكرك بـ "${reminder_text}" في الميعاد ده: ${formattedLocalTime} بتوقيت القاهرة`);
-                                       console.log(`✅ Reminder successfully parsed by AI and scheduled for ${from}.`);
-                                   }
-                               }
-                           } catch (validationError) {
-                               console.error("❌ Error validating/processing date returned by OpenAI:", validationError);
-                               await sendWhatsAppMessage(from, "حصلت مشكلة تقنية وأنا بحاول أتأكد من الوقت اللي فهمته. حاول تاني لو سمحت.");
-                           }
-                           // --- End Process Valid Parsed Reminder ---
-                        } else { // Handle failed OpenAI parsing
-                            console.warn("⚠️ OpenAI could not parse the reminder details confidently.");
-                            await sendWhatsAppMessage(from, "معلش، حاولت أفهم الوقت والتاريخ من كلامك بس متلخبط شوية. 🤔 ممكن تكتبهولي بصيغة أوضح أو تستخدم الصيغة دي:<y_bin_46>-MM-DD HH:MM ؟");
+                            const { reminder_text, local_datetime_iso } = parsedReminder;
+                            console.log(`✅ OpenAI parsed: Text='${reminder_text}', Time='${local_datetime_iso}'`);
+                            try {
+                                const formatString = 'yyyy-MM-dd HH:mm';
+                                const localDateTime = DateTime.fromFormat(local_datetime_iso, formatString, { zone: TIME_ZONE });
+                                if (!localDateTime.isValid) {
+                                    console.warn(`⚠️ Failed date validation from OpenAI: "${local_datetime_iso}". Reason: ${localDateTime.invalidReason || 'Unknown'}`);
+                                    await sendWhatsAppMessage(from, `معلش، الوقت فيه مشكلة: "${local_datetime_iso}".\nالسبب: ${localDateTime.invalidReason}.\nجرب صيغة YYYY-MM-DD HH:MM`);
+                                } else {
+                                    const executeAtUtc = localDateTime.toUTC();
+                                    const nowUtc = DateTime.utc();
+                                    if (executeAtUtc <= nowUtc.plus({ minutes: 1 })) {
+                                        console.warn("⚠️ Reminder time is in the past.");
+                                        await sendWhatsAppMessage(from, `الوقت (${local_datetime_iso}) عدى. حدد وقت في المستقبل.`);
+                                    } else {
+                                        const executeAtUtcDate = executeAtUtc.toJSDate();
+                                        await addReminder(from, reminder_text, executeAtUtcDate); // << await is valid here
+                                        const formattedLocalTime = localDateTime.toFormat('yyyy-MM-dd hh:mm a');
+                                        await sendWhatsAppMessage(from, `تمام 👍، هفكرك بـ "${reminder_text}" في الميعاد ده: ${formattedLocalTime} بتوقيت القاهرة`); // << await is valid here
+                                        console.log(`✅ Reminder scheduled for ${from}.`);
+                                    }
+                                }
+                            } catch (validationError) {
+                                console.error("❌ Error validating date:", validationError);
+                                await sendWhatsAppMessage(from, "حصلت مشكلة وأنا بتأكد من الوقت."); // << await is valid here
+                            }
+                        } else {
+                            console.warn("⚠️ OpenAI could not parse reminder details.");
+                            await sendWhatsAppMessage(from, "معلش، حاولت أفهم الوقت بس متلخبط. 🤔 ممكن تكتبه بصيغة YYYY-MM-DD HH:MM ؟"); // << await is valid here
                         }
-                    } // End of reminder keyword check
+                    } // End Reminder Check
 
-                    // 2. Check for Specific Queries (like "What time is it?")
-                    // Only check if it wasn't identified as a reminder attempt
+                    // 2. Check Specific Queries (Time, Schedule) only if not reminder
                     if (!reminderProcessed) {
-                        // Handle "What time is it?" directly
+                        // Check for Time Query
                         if (lowerMsgBody.includes("الساعة كام") || lowerMsgBody.includes("الوقت ايه") || lowerMsgBody === "الوقت") {
-                            console.log("ℹ️ Detected time query. Handling directly.");
-                            handledSpecifically = true; // Mark as handled
+                            console.log("ℹ️ Handling time query directly.");
+                            handledSpecifically = true;
                             const nowInCairo = DateTime.now().setZone(TIME_ZONE);
                             const formattedTime = nowInCairo.toFormat('hh:mm a', { locale: 'ar-EG' });
                             const replyMsg = `الساعة دلوقتي ${formattedTime} بتوقيت القاهرة.`;
-                            await sendWhatsAppMessage(from, replyMsg); // This call will also log the bot reply
+                            await sendWhatsAppMessage(from, replyMsg); // << await is valid here
                         }
-                        // Check for Schedule Query (using findReminders function)
-                        // Add the 'else if' here to avoid conflict with time query
-                        else { // Only check for schedule if it wasn't a time query
+                        // Check for Schedule Query (if not time query)
+                        else {
                             let queryDate = null;
                             let querySubject = null;
                             let isScheduleQuery = false;
                             let extractedDatePhrase = null;
                             const scheduleKeywords = ["مواعيد", "عندي ايه", "في ايه", "ايه جدول", "ايه تذكيرات"];
 
-                            // Basic intent/entity extraction for schedule queries
                             if (scheduleKeywords.some(keyword => lowerMsgBody.includes(keyword))) {
                                 isScheduleQuery = true;
+                                // Basic date phrase extraction (Needs improvement for robustness)
                                 if (lowerMsgBody.includes("بكرة") || lowerMsgBody.includes("غدا")) {
-                                    extractedDatePhrase = "بكرة";
-                                    queryDate = DateTime.now().setZone(TIME_ZONE).plus({ days: 1 }).startOf('day').toJSDate();
+                                    extractedDatePhrase = "بكرة"; queryDate = DateTime.now().setZone(TIME_ZONE).plus({ days: 1 }).startOf('day').toJSDate();
                                 } else if (lowerMsgBody.includes("النهاردة") || lowerMsgBody.includes("اليوم")) {
-                                     if (lowerMsgBody.includes("اليوم ده") || lowerMsgBody.includes("اليوم دا")) {
-                                         // Ask for clarification for "this day" as context might be weak
-                                         isScheduleQuery = true;
-                                         queryDate = null;
-                                         extractedDatePhrase = "اليوم ده";
-                                     } else {
-                                         extractedDatePhrase = "النهاردة";
-                                         queryDate = DateTime.now().setZone(TIME_ZONE).startOf('day').toJSDate();
-                                     }
+                                    if (lowerMsgBody.includes("اليوم ده") || lowerMsgBody.includes("اليوم دا")) {
+                                        isScheduleQuery = true; queryDate = null; extractedDatePhrase = "اليوم ده"; // Force clarification
+                                    } else {
+                                        extractedDatePhrase = "النهاردة"; queryDate = DateTime.now().setZone(TIME_ZONE).startOf('day').toJSDate();
+                                    }
                                 }
-                                // Add more date parsing here if needed (e.g., specific dates, day names)
                             }
+                            // Basic subject extraction
                             const subjectQueryMatch = msg_body.match(/^(?:امتى|معاد|تذكير)\s+(.+)/i);
                             if (subjectQueryMatch && subjectQueryMatch[1]) {
-                                querySubject = subjectQueryMatch[1].replace(/[؟?]/g, '').trim();
-                                isScheduleQuery = true;
-                            } else if (lowerMsgBody.includes("بتاع السفر") && !querySubject && isScheduleQuery) {
-                                 querySubject = "طيارة"; // Infer subject
-                            }
+                                querySubject = subjectQueryMatch[1].replace(/[؟?]/g, '').trim(); isScheduleQuery = true;
+                            } else if (lowerMsgBody.includes("بتاع السفر") && !querySubject && isScheduleQuery) { querySubject = "طيارة"; }
 
-                            // --- Execute schedule query if criteria met ---
-                            if(isScheduleQuery && (queryDate || querySubject)) {
-                                console.log(`ℹ️ Detected schedule query. Date: ${queryDate ? queryDate.toISOString().split('T')[0] : 'N/A'}, Subject: ${querySubject || 'N/A'}`);
-                                handledSpecifically = true; // Mark as handled
-
-                                // *** This is the line that caused the 'await' error (now correctly inside async scope) ***
+                            // Execute schedule query if valid criteria found
+                            if (isScheduleQuery && (queryDate || querySubject)) {
+                                console.log(`ℹ️ Handling schedule query. Date: ${queryDate ? queryDate.toISOString().split('T')[0] : 'N/A'}, Subject: ${querySubject || 'N/A'}`);
+                                handledSpecifically = true;
+                                // *** This await call is now correctly inside the async function scope ***
                                 const reminders = await findReminders({ conversationId: from, queryDate, querySubject });
-
-                                // Format reply based on results
                                 let replyMsg = "";
                                 if (reminders.length > 0) {
                                     replyMsg = `تمام، دي المواعيد المسجلة `;
@@ -211,39 +177,43 @@ router.post('/', async (req, res) => {
                                      if (querySubject) { replyMsg += `بخصوص "${querySubject}" `; }
                                     replyMsg += `حالياً.`;
                                 }
-                                await sendWhatsAppMessage(from, replyMsg.trim());
-
+                                await sendWhatsAppMessage(from, replyMsg.trim()); // << await is valid here
                             } else if (isScheduleQuery) {
                                  // Vague query, ask for clarification
-                                 console.log("ℹ️ Detected vague schedule query, asking for clarification.");
+                                 console.log("ℹ️ Detected vague schedule query.");
                                  handledSpecifically = true;
-                                 await sendWhatsAppMessage(from, "أفندم؟ بتسأل عن مواعيد يوم إيه أو بخصوص إيه بالظبط؟");
+                                 await sendWhatsAppMessage(from, "أفندم؟ بتسأل عن مواعيد يوم إيه أو بخصوص إيه بالظبط؟"); // << await is valid here
                             }
-                        } // End of schedule query check
-                    } // End else (if not time query)
-                } // End if (!reminderProcessed)
+                        } // END Schedule Query Check
+                    } // END if (!reminderProcessed)
 
-                // 3. Fallback General Reply
-                // Only if NOT reminder AND NOT handled specifically by other logic
-                if (!reminderProcessed && !handledSpecifically) {
-                    console.log("💬 Fallback: Sending to OpenAI for general reply (including history)...");
-                    const aiReply = await getReplyFromOpenAI(msg_body, from); // Pass history context
-                    if (aiReply) {
-                        await sendWhatsAppMessage(from, aiReply); // This logs the reply
-                    } else {
-                        console.warn("⚠️ No reply generated by OpenAI for general query.");
+                    // 3. Fallback General Reply
+                    if (!reminderProcessed && !handledSpecifically) {
+                        console.log("💬 Fallback: Sending to OpenAI for general reply...");
+                        const aiReply = await getReplyFromOpenAI(msg_body, from); // << await is valid here
+                        if (aiReply) {
+                            await sendWhatsAppMessage(from, aiReply); // << await is valid here
+                        } else { console.warn("⚠️ No general reply from OpenAI."); }
                     }
-                }
-                // --- End of Message Processing Logic ---
+                    // --- End Message Processing Logic ---
 
-            } else { console.warn("⚠️ Webhook received empty msg_body or missing sender 'from'."); }
-        } else { console.log(`➡️ Received non-text message type: ${message.type} from ${from}`); }
-    } else { console.log('✅ Received event is not a standard incoming WhatsApp message.'); }
+                } else { console.warn("⚠️ Empty msg_body or missing 'from'."); }
+            } else { console.log(`➡️ Received non-text message: ${message.type}`); }
+        // <<< Correct closing brace for 'if (value?.messaging_product...)'
+        } else {
+             // This 'else' corresponds to the 'if (value?.messaging_product...)'
+             console.log('✅ Received event is not a standard incoming WhatsApp message.');
+        } // <<< Correct closing brace placement
 
-    // IMPORTANT: Acknowledge receipt to Meta quickly
-    if (!res.headersSent) { res.sendStatus(200); }
+    } catch (err) { // <<< OUTER CATCH >>> for the main processing block
+        console.error("❌ CRITICAL: Unexpected error in POST /webhook handler:", err);
+        // Acknowledge to Meta even if processing failed catastrophically
+        if (!res.headersSent) {
+             res.sendStatus(200); // Use 200 OK to prevent retries, handle error internally
+        }
+    } // <<< END OUTER CATCH >>>
+}); // END router.post('/')
 
-} catch (err) { // Outer Catch block for any unexpected errors
-    console.error("❌ CRITICAL: Unexpected error in POST /webhook handler:", err);
-    if (!res.headersSent) { res.sendStatus(200); }
-}
+// --- Final Export ---
+// Export the router to be used by the main application file (index.js)
+module.exports = router;
