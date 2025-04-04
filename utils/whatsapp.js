@@ -6,8 +6,9 @@ const { getDb } = require('./database'); // Adjust path if needed ('./database' 
 
 // --- Load WhatsApp Credentials from Environment Variables ---
 // Make sure these environment variable names match EXACTLY what you set in Render
-const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN; // Or maybe META_TOKEN? Double check your variable name
-const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID; // Double check your variable name
+// عدل الأسماء دي لو لازم عشان تطابق اللي في Render
+const WHATSAPP_TOKEN = process.env.META_TOKEN; // غيرتها لـ META_TOKEN كمثال بناءً على الصورة
+const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID; // اتأكد من الاسم الكامل ده في Render
 
 /**
  * Sends a text message using the WhatsApp Business API and logs the reply.
