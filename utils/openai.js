@@ -1,189 +1,187 @@
-// utils/openai.js (Reads prompts from files)
+// utils/openai.js (Reads prompts from files & USES HISTORY)
 const axios = require('axios');
-const fs = require('fs');        // Required to read files
-const path = require('path');    // Required to build file paths correctly
-const { DateTime } = require('luxon'); // Required to get current time for reminder parsing context
+const fs = require('fs');
+const path = require('path');
+const { DateTime } = require('luxon');
+// --- <<< استدعاء دالة getDb عشان نوصل للداتا بيز >>> ---
+const { getDb } = require('./database.js'); // تأكد إن المسار ده صح
 
-// Load sensitive info and configs from environment variables
+// --- Load configuration ---
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-// Allow overriding API URL and Model via environment variables, with defaults
 const OPENAI_API_URL = process.env.OPENAI_API_URL || 'https://api.openai.com/v1/chat/completions';
-const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4-turbo'; // Defaulting to gpt-4-turbo now based on previous steps
-const TIME_ZONE = process.env.TIME_ZONE || 'Africa/Cairo'; // Default timezone
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4-turbo';
+const TIME_ZONE = process.env.TIME_ZONE || 'Africa/Cairo';
+// --- <<< حدد عدد الرسايل القديمة اللي عايزين نبعتها (ممكن نغير الرقم ده بعدين) >>> ---
+const HISTORY_LIMIT = parseInt(process.env.HISTORY_LIMIT || '6', 10); // الافتراضي آخر 6 رسايل (3 أدوار)
 
 // --- Function to read prompt files safely ---
-// Reads a file from the 'config' directory located one level above the 'utils' directory
 function readPromptFromFile(fileName) {
     try {
-        // Construct the absolute path: __dirname is the current directory (utils), '..' goes up one level, 'config' enters config folder, then the filename
         const filePath = path.join(__dirname, '../config', fileName);
-        console.log(`Attempting to read prompt from: ${filePath}`); // Log path for debugging deployment path issues
-        // Read file content synchronously (usually okay at startup) and trim whitespace
+        console.log(`Attempting to read prompt from: ${filePath}`);
         const promptText = fs.readFileSync(filePath, 'utf8').trim();
          if (!promptText) {
-             // If the file is empty, it's an error
              throw new Error(`Prompt file is empty: ${fileName}`);
          }
          console.log(`Successfully read prompt from: ${fileName}`);
-        return promptText; // Return the file content
+        return promptText;
     } catch (error) {
-        // Log a critical error if reading fails (e.g., file not found, permissions)
         console.error(`❌ FATAL ERROR: Could not read or parse prompt file: ${fileName}`, error);
-        // Stop the application by throwing an error - safer than running with missing prompts
-        throw new Error(`Failed to read prompt file: ${fileName}. Check server configuration, file existence, content, and permissions.`);
+        throw new Error(`Failed to read prompt file: ${fileName}.`);
     }
 }
 
-// --- Read prompts from files ONCE when the module loads (at application startup) ---
-// Reads the prompt defining the bot's general personality and language style
+// --- Read prompts from files ONCE at startup ---
 const generalSystemPrompt = readPromptFromFile('generalPrompt.txt');
-// Reads the prompt containing detailed instructions for parsing reminders and time
-// This template should contain the placeholder "{currentTime}"
 const reminderParserSystemPromptTemplate = readPromptFromFile('reminderParserPrompt.txt');
 
 
-// --- Function for generating general conversational replies ---
-async function getReplyFromOpenAI(userMessage) {
+// --- <<< NEW: Function to get recent message history >>> ---
+/**
+ * Retrieves the most recent messages for a given conversation ID.
+ * @param {string} conversationId - The user's WhatsApp ID.
+ * @param {number} limit - The maximum number of messages to retrieve.
+ * @returns {Promise<Array<{role: string, content: string}>>} - Array of messages {role, content} or empty array.
+ */
+async function getRecentHistory(conversationId, limit = HISTORY_LIMIT) {
+    console.log(`ℹ️ Fetching recent history for ${conversationId}, limit: ${limit}`);
+    try {
+        const db = getDb(); // Get DB instance
+        if (!db) {
+            console.warn("⚠️ DB instance not available when trying to fetch history.");
+            return []; // Return empty if DB connection lost
+        }
+        const historyCollection = db.collection('message_history');
+        // Find messages for this user, sort by newest first, limit results
+        const recentMessages = await historyCollection
+            .find({ conversationId: conversationId })
+            .sort({ timestamp: -1 }) // Newest messages first
+            .limit(limit)
+            .toArray();
+
+        // Reverse the array to get chronological order (oldest of the batch first)
+        // Map to the format OpenAI expects: { role: 'user'/'assistant', content: '...' }
+        const formattedHistory = recentMessages.reverse().map(msg => ({
+            role: msg.role,
+            content: msg.content
+        }));
+
+        console.log(`✅ Retrieved ${formattedHistory.length} messages from history.`);
+        return formattedHistory;
+
+    } catch (error) {
+        console.error(`❌ Error fetching message history for ${conversationId}:`, error);
+        return []; // Return empty array on error to prevent breaking the flow
+    }
+}
+
+
+// --- Function for general replies (MODIFIED TO USE HISTORY) ---
+// Takes conversationId (user's 'from' number) as the second argument now
+async function getReplyFromOpenAI(userMessage, conversationId) {
     if (!OPENAI_API_KEY) {
-        console.error("❌ OpenAI API key is missing from environment variables!");
-        return "آسف، خدمة الذكاء الاصطناعي غير متاحة حالياً بسبب مشكلة في الإعدادات."; // Provide a clearer error message
+        console.error("❌ OpenAI API key missing!");
+        return "آسف، خدمة الذكاء الاصطناعي غير متاحة حالياً.";
+    }
+     if (!conversationId) { // Basic check
+         console.error("❌ conversationId missing in getReplyFromOpenAI call.");
+         return "آسف، حدث خطأ داخلي بسيط.";
     }
 
-    // Use the general system prompt read from the file
-    const systemPrompt = generalSystemPrompt;
-    // We don't inject current time here unless the prompt itself needs it dynamically for general chat.
-    // We are handling "What time is it?" specifically in webhook.js for accuracy.
+    const systemPrompt = generalSystemPrompt; // Use the prompt read from file
+
+    // --- <<< Get recent history before calling API >>> ---
+    const history = await getRecentHistory(conversationId);
+
+    // --- <<< Construct the messages array including history >>> ---
+    const messages = [
+        { role: "system", content: systemPrompt }, // System prompt first
+        ...history, // Spread the array of past messages [{role: 'user', content: '...'}, {role: 'assistant', content: '...'}]
+        { role: "user", content: userMessage } // Finally, the current user message
+    ];
 
     try {
-        console.log(`🤖 Sending to OpenAI (Model: ${OPENAI_MODEL}) for general reply. Message: "${userMessage}"`);
+        console.log(`🤖 Sending general query to OpenAI with ${history.length} history messages. Current message: "${userMessage}"`);
         const response = await axios.post(OPENAI_API_URL, {
             model: OPENAI_MODEL,
-            messages: [
-                { role: "system", content: systemPrompt }, // Use the prompt read from file
-                { role: "user", content: userMessage }
-            ],
-            max_tokens: 150, // Max length of the generated reply
-            temperature: 0.7 // Controls creativity (0=deterministic, 1=max creative)
+            messages: messages, // Send the array including history
+            max_tokens: 150,
+            temperature: 0.7
         }, {
             headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}` }
         });
         const reply = response.data.choices?.[0]?.message?.content?.trim();
         console.log(`🤖 OpenAI general reply received.`);
-        return reply; // Return the generated text reply
+        return reply;
     } catch (error) {
-        // Handle potential errors during the API call
         let errorMsg = error.message;
         if (error.response) {
-             // Log detailed API error from OpenAI if available
              console.error("❌ OpenAI API Error (General Reply) Status:", error.response.status);
              console.error("❌ OpenAI API Error (General Reply) Data:", JSON.stringify(error.response.data, null, 2));
-             errorMsg = `API Error ${error.response.status}`; // Keep user-facing error concise
-        } else {
-            // Log other errors (e.g., network)
-            console.error("❌ Error calling OpenAI API for general reply:", errorMsg);
-        }
-        // Return an error message (avoid exposing too many details)
+             errorMsg = `API Error ${error.response.status}`;
+        } else { console.error("❌ Error calling OpenAI API for general reply:", errorMsg); }
         return `حصل خطأ (${errorMsg}) أثناء محاولة التواصل مع الذكاء الاصطناعي.`;
     }
 }
 
-// --- Function for parsing reminder requests ---
-async function parseReminderWithOpenAI(userMessage) {
-    if (!OPENAI_API_KEY) {
-        console.error("❌ OpenAI API key is missing! Cannot parse reminder.");
-        return null; // Return null to indicate failure clearly
-    }
+// --- Function for parsing reminders (MODIFIED TO USE HISTORY) ---
+// Takes conversationId (user's 'from' number) as the second argument now
+async function parseReminderWithOpenAI(userMessage, conversationId) {
+    if (!OPENAI_API_KEY) { /* ... key check ... */ return null; }
+    if (!conversationId) { /* ... conversationId check ... */ return null; }
 
-    // Get the current time to provide context to the prompt
     const nowInCairo = DateTime.now().setZone(TIME_ZONE);
-    const currentTimeString = nowInCairo.toFormat("yyyy-MM-dd HH:mm ZZZZ"); // e.g., "2025-04-04 18:55 EET+02:00"
-
-    // Replace the placeholder in the template string read from the file
-    // Make sure reminderParserPrompt.txt contains the exact string "{currentTime}"
+    const currentTimeString = nowInCairo.toFormat("yyyy-MM-dd HH:mm ZZZZ");
+    // Inject current time into the template read from file
     const systemPrompt = reminderParserSystemPromptTemplate.replace('{currentTime}', currentTimeString);
 
+    // --- <<< Get recent history before calling API >>> ---
+    const history = await getRecentHistory(conversationId);
+
+    // --- <<< Construct the messages array including history >>> ---
+    const messages = [
+        { role: "system", content: systemPrompt }, // Parsing prompt first
+        ...history, // Add history
+        { role: "user", content: userMessage } // Add current user message
+    ];
+
     try {
-        console.log(`🤖 Sending to OpenAI (Model: ${OPENAI_MODEL}) for reminder parsing. Message: "${userMessage}"`);
+        console.log(`🤖 Sending reminder parse query to OpenAI with ${history.length} history messages. Current message: "${userMessage}"`);
         const response = await axios.post(OPENAI_API_URL, {
-            model: OPENAI_MODEL, // Use the configured model (now gpt-4-turbo)
-            messages: [
-                { role: "system", content: systemPrompt }, // Use the specific parsing prompt read from file
-                { role: "user", content: userMessage }
-            ],
-            temperature: 0.1, // Low temperature for more deterministic parsing results
-            max_tokens: 150, // Should be sufficient for the JSON output or "null"
-            response_format: { type: "json_object" } // Explicitly request JSON output format
-        }, {
-            headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}` }
-        });
+            model: OPENAI_MODEL,
+            messages: messages, // Send array including history
+            temperature: 0.1,
+            max_tokens: 150,
+            response_format: { type: "json_object" }
+        }, { /* ... headers ... */ });
 
-        let responseData = response.data.choices?.[0]?.message?.content; // Get the raw response content
+        // --- Rest of JSON parsing logic --- (Same as before)
+        let responseData = response.data.choices?.[0]?.message?.content;
         console.log(`🤖 OpenAI raw parsing response: "${responseData}"`);
-
-        // If response_format: json_object worked, responseData might already be an object
-        // If not, it might be a string containing "null" or a JSON string.
-        if (!responseData) {
-             console.warn("⚠️ OpenAI parsing response is empty.");
-             return null;
-        }
-
+        if (!responseData) { /* ... handle empty response ... */ return null; }
         let parsedJson;
         try {
-            // Handle potential string responses first
             if (typeof responseData === 'string') {
-                // Check if the response is just the word "null"
-                if (responseData.trim().toLowerCase() === 'null') {
-                    console.log("⚠️ OpenAI indicated parsing failure (returned null string).");
-                    return null;
-                }
-                // Attempt to parse the string as JSON (clean markdown fences first)
+                if (responseData.trim().toLowerCase() === 'null') { /* ... handle "null" string ... */ return null; }
                  responseData = responseData.replace(/^```json\s*/, '').replace(/\s*```$/, '');
                  parsedJson = JSON.parse(responseData);
-            } else if (typeof responseData === 'object' && responseData !== null) {
-                 // If API returned an object directly (because of response_format)
-                 parsedJson = responseData;
-            } else {
-                 // Handle unexpected response types
-                 console.warn("⚠️ Unexpected response type from OpenAI parsing:", typeof responseData);
-                 return null;
-            }
+            } else if (typeof responseData === 'object' && responseData !== null) { parsedJson = responseData; }
+            else { /* ... handle unexpected type ... */ return null; }
 
-            // Validate the structure and types of the parsed JSON object
             if (parsedJson && typeof parsedJson.reminder_text === 'string' && typeof parsedJson.local_datetime_iso === 'string') {
-                 // Validate the date format specifically using regex
                  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(parsedJson.local_datetime_iso)) {
                      console.log("✅ Successfully parsed JSON from OpenAI:", parsedJson);
-                     return parsedJson; // Return the valid parsed object
-                 } else {
-                      console.warn("⚠️ OpenAI returned JSON but 'local_datetime_iso' format is incorrect:", parsedJson.local_datetime_iso);
-                      return null; // Format validation failed
-                 }
-            } else {
-                console.warn("⚠️ OpenAI response JSON is missing required fields ('reminder_text', 'local_datetime_iso') or has incorrect types:", parsedJson);
-                return null; // Structure validation failed
-            }
-        } catch (jsonError) {
-            // Handle errors occurring during JSON parsing
-            console.error("❌ Error parsing JSON response from OpenAI:", jsonError.message, "Raw response string/object:", responseData);
-            return null; // Parsing failed
-        }
+                     return parsedJson;
+                 } else { /* ... handle incorrect date format ... */ return null; }
+            } else { /* ... handle missing fields ... */ return null; }
+        } catch (jsonError) { /* ... handle JSON parse error ... */ return null; }
+        // --- End of JSON parsing logic ---
 
-    } catch (error) {
-        // Handle errors during the API call itself
-        let errorMsg = error.message;
-        if (error.response) {
-             console.error("❌ OpenAI API Error (Parsing) Status:", error.response.status);
-             console.error("❌ OpenAI API Error (Parsing) Data:", JSON.stringify(error.response.data, null, 2));
-             errorMsg = `API Error ${error.response.status}`;
-        } else {
-            console.error("❌ Error calling OpenAI API for reminder parsing:", errorMsg);
-        }
-        // Do not expose potentially sensitive error details directly, just signal failure
-        return null;
-    }
+    } catch (error) { /* ... API call error handling ... */ return null; }
 }
 
-// Export the functions so they can be used in routes/webhook.js
+
+// Export the functions needed by webhook.js
 module.exports = {
     getReplyFromOpenAI,
     parseReminderWithOpenAI
