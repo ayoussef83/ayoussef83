@@ -1,93 +1,74 @@
-// utils/database.js (REVISED to correctly export getDb)
-const { MongoClient, ServerApiVersion } = require('mongodb');
-// dotenv should ideally be called only ONCE at the very beginning of index.js
-// Make sure you have `require('dotenv').config();` at the top of your main index.js
-// require('dotenv').config(); // Remove or comment out if called in index.js
+// utils/database.js (أضف هذه الدالة وعدل الـ exports)
+// ... (الكود بتاع connectDB و getDb و getRemindersCollection زي ما هو فوق) ...
 
-const MONGO_URI = process.env.MONGO_URI;
-// Use a default name if not provided, or make DB_NAME an env variable too
-const DB_NAME = process.env.DB_NAME || 'AzoozBot';
-const REMINDERS_COLLECTION = 'reminders'; // Collection name for reminders
-const HISTORY_COLLECTION = 'message_history'; // Collection name for history
-
-if (!MONGO_URI) {
-    console.error('❌ FATAL: MONGO_URI environment variable is not set!');
-    process.exit(1); // Exit if critical config is missing
-}
-
-// Create a single MongoClient instance to be reused
-const client = new MongoClient(MONGO_URI, {
-    serverApi: {
-        version: ServerApiVersion.v1,
-        strict: true,
-        deprecationErrors: true,
-    }
-});
-
-// Module-scoped variable to hold the database instance once connected
-let db;
-
-/**
- * Connects to the MongoDB database, assigns the db instance, and ensures necessary indexes.
- * Should be called once at application startup.
+/** // <<<--- الدالة الجديدة ---<<<
+ * Finds reminders for a specific user based on date or subject.
+ * @param {object} options
+ * @param {string} options.conversationId - The user's WhatsApp ID.
+ * @param {Date} [options.queryDate] - Optional: The specific date to search for (start of day, UTC).
+ * @param {string} [options.querySubject] - Optional: A keyword to search within the reminder message.
+ * @returns {Promise<Array<object>>} - A promise that resolves to an array of reminder documents.
  */
-async function connectDB() {
-    if (db) {
-        console.log("Database connection already established.");
-        return db; // Return existing connection
-    }
+async function findReminders({ conversationId, queryDate, querySubject }) {
+    console.log(`ℹ️ Finding reminders for ${conversationId} with criteria: Date=${queryDate ? queryDate.toISOString().split('T')[0] : 'N/A'}, Subject=${querySubject || 'N/A'}`);
     try {
-        console.log("Connecting to MongoDB Atlas...");
-        await client.connect(); // Connect the client
-        db = client.db(DB_NAME); // Assign the database instance
-        console.log(`✅ Successfully connected to MongoDB Atlas! Database: ${DB_NAME}`);
+        const db = getDb();
+        if (!db) {
+            console.warn("⚠️ DB instance not available when trying to find reminders.");
+            return [];
+        }
+        const collection = getRemindersCollection(); // Use existing function to get 'reminders' collection
 
-        // Ensure indexes exist for optimal query performance
-        // Reminder collection index
-        const remindersCollection = db.collection(REMINDERS_COLLECTION);
-        await remindersCollection.createIndex({ executeAt: 1 });
-        console.log(`Index created/ensured on ${REMINDERS_COLLECTION}.executeAt field.`);
+        let query = { to: conversationId }; // Always filter by user
 
-        // Message history collection index (compound index useful for fetching recent history for a user)
-        const historyCollection = db.collection(HISTORY_COLLECTION);
-        await historyCollection.createIndex({ conversationId: 1, timestamp: -1 });
-        console.log(`Index created/ensured on ${HISTORY_COLLECTION}.{conversationId, timestamp}.`);
+        // Build query based on provided date
+        if (queryDate instanceof Date && !isNaN(queryDate)) {
+            // Create a date range for the entire day in UTC
+            // The date received should represent the start of the target day in local time,
+            // we convert it to UTC start and end of day for MongoDB query.
+            // Note: This assumes queryDate is already set to the START of the target day.
+            const dateStart = new Date(queryDate); // Assuming queryDate is start of day UTC (or needs conversion)
+            // Let's ensure it's start of day UTC
+            dateStart.setUTCHours(0, 0, 0, 0);
+            const dateEnd = new Date(dateStart);
+            dateEnd.setUTCDate(dateStart.getUTCDate() + 1); // Start of the *next* day UTC
 
-        return db; // Return the db instance after successful connection and indexing
-    } catch (err) {
-        console.error('❌ CRITICAL: Failed to connect to MongoDB Atlas or ensure indexes:', err);
-        // Exit the process if database connection fails on startup
-        process.exit(1);
+            query.executeAt = { $gte: dateStart, $lt: dateEnd }; // Find reminders within that UTC day
+            console.log(`   Querying date range UTC: ${dateStart.toISOString()} to ${dateEnd.toISOString()}`);
+        }
+
+        // Build query based on provided subject (case-insensitive)
+        if (querySubject && typeof querySubject === 'string' && querySubject.trim().length > 0) {
+            // Escape special regex characters to allow searching for them literally
+            const escapedSubject = querySubject.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            query.message = { $regex: escapedSubject, $options: 'i' }; // Case-insensitive regex search
+            console.log(`   Querying subject regex: /${escapedSubject}/i`);
+        }
+
+        // Avoid running query if no specific criteria (date or subject) is given
+        // (We should always have conversationId, so check if other keys exist)
+        if (Object.keys(query).length <= 1) {
+             console.log("⚠️ findReminders called without specific date or subject criteria.");
+             // Depending on desired behavior, we might return an empty array or a specific indicator
+             return []; // Return empty array if no specific criteria provided
+        }
+
+
+        // Execute the query, sort by time, limit results
+        const reminders = await collection.find(query)
+            .sort({ executeAt: 1 }) // Sort reminders chronologically
+            .limit(20) // Limit the number of results to avoid very long messages
+            .toArray();
+
+        console.log(`✅ Found ${reminders.length} matching reminders.`);
+        return reminders; // Return the array of reminder documents found
+
+    } catch (error) {
+        console.error(`❌ Error finding reminders for ${conversationId}:`, error);
+        return []; // Return empty array in case of database errors
     }
 }
 
-/**
- * Returns the reminders collection instance. Throws an error if DB not connected.
- * @returns {import('mongodb').Collection}
- */
-function getRemindersCollection() {
-    if (!db) {
-        console.error("❌ getRemindersCollection called before DB connection was established!");
-        // It's better to throw an error here to catch programming mistakes early
-        throw new Error("Database not initialized. Call connectDB first.");
-    }
-    return db.collection(REMINDERS_COLLECTION);
-}
-
-/** // <<<--- الدالة الجديدة والمهمة ---<<<
- * Returns the database instance. Throws an error if DB not connected.
- * Allows accessing any collection, like message_history.
- * @returns {import('mongodb').Db}
- */
-function getDb() {
-    if (!db) {
-        console.error("❌ getDb called before DB connection was established!");
-        // Throw error to ensure DB is connected before use
-        throw new Error("Database not initialized. Call connectDB first.");
-    }
-    return db; // Return the reference to the connected database instance
-}
-
-// Export the functions needed by other modules
-//           <<<--- تم إضافة getDb هنا للتصدير ---<<<
-module.exports = { connectDB, getDb, getRemindersCollection };
+// --- تعديل سطر module.exports ---
+// Export the necessary functions, including the new findReminders
+module.exports = { connectDB, getDb, getRemindersCollection, findReminders }; // Add findReminders here
