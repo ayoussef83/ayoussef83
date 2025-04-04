@@ -1,31 +1,35 @@
 // index.js
 const express = require('express');
 const dotenv = require('dotenv');
-// const webhookRoutes = require('./routes/webhook'); // هنشيل الكومنت لما نعمل الملف ده
-// const { initializeReminderProcessor } = require('./scheduler/reminderQueue'); // هنشيل الكومنت لما نعمل الملف ده
+// الخطوة دي: بنشيل الكومنت من السطر الجاي عشان نستدعي ملف الرووتس
+const webhookRoutes = require('./routes/webhook');
+// const { initializeReminderProcessor } = require('./scheduler/reminderQueue'); // لسه شوية على دي
 
+// التأكد من تحميل متغيرات البيئة أول حاجة
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 10000; // Render بيستخدم متغير PORT أو 10000 كافتراضي
+// Render بيوفر متغير البيئة PORT تلقائياً
+const PORT = process.env.PORT || 10000;
 
-// Middleware لتحليل JSON (مهم للـ webhooks)
+// Middleware لتحليل JSON
 app.use(express.json());
 
-// // Webhook Route (هنشيل الكومنت لما نعمل الملف بتاعه)
-// app.use('/webhook', webhookRoutes);
+// الخطوة دي: بنشيل الكومنت من السطر الجاي عشان نستخدم الرووتس فعلاً
+// أي طلب ييجي على /webhook هيتم توجيهه لملف webhookRoutes
+app.use('/webhook', webhookRoutes);
 
 // Root Route للتأكد إن السيرفر شغال
 app.get('/', (req, res) => {
-  res.send('Azo0z is starting up on Render! 🚀');
+  // ممكن نغير الرسالة عشان نعرف إن التحديث وصل
+  res.send('Azo0z v2 is starting up on Render! Webhook route active. 🚀');
 });
 
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
-  // // Initialize Schedulers (هنشيل الكومنت لما نعمل الملفات بتاعتهم)
+  console.log(`Webhook endpoint ready at /webhook`);
+  // // Initialize Schedulers (لسه شوية)
   // initializeReminderProcessor();
-  // ممكن نضيف هنا أي مهام تانية بتشتغل مع بداية السيرفر لو فيه
 });
 
-// سطر احتياطي عشان نتأكد إن الملف اتعمل صح
-console.log("index.js loaded successfully.");
+console.log("index.js v2 loaded successfully.");
