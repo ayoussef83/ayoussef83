@@ -80,4 +80,3 @@ async function sendWhatsAppMessage(to, text) {
 
 // Export the function
 module.exports = { sendWhatsAppMessage };
-
