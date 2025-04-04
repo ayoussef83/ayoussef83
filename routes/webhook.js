@@ -6,7 +6,7 @@ const { sendWhatsAppMessage } = require('../utils/whatsapp');
 const { addReminder } = require('../scheduler/reminderQueue');
 const { getDb } = require('../utils/database'); // <--- مهم للداتا بيز
 const { DateTime } = require('luxon');
-
+const { getDb } = require('../utils/database.js');
 const router = express.Router();
 
 // --- Load configuration from environment variables ---
